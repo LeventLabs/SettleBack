@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+
+# Local configuration and secrets
+.env
+.env.*
+secrets/
+*.pem
+*.key
+
+# Runtime data: databases and evidence payloads
+data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/*/31337/
+contracts/broadcast/**/dry-run/

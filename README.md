@@ -32,7 +32,7 @@ A repayment is a new seller-funded transfer, not a reversal. Payment evidence do
 
 ## Current status
 
-**Planning stage.** This repository currently contains the project overview; application code, setup instructions, tests, and deployment references will follow as they are implemented.
+**Early development.** The application skeleton (server, web shell, shared domain package, and contract workspace) is in place. Recovery features, tests for them, and deployment references will follow as they are implemented.
 
 The MVP targets:
 
@@ -42,6 +42,37 @@ The MVP targets:
 - Cited evidence analysis and an inspectable recovery record.
 
 Live HSP access and integration remain unverified for SettleBack. No deployed contract, completed payment flow, or production readiness is claimed.
+
+## Development
+
+Requirements: Node.js 24.15 or later (see `.nvmrc`), npm 11, and [Foundry](https://getfoundry.sh/) for the contracts.
+
+```bash
+git clone --recurse-submodules https://github.com/LeventLabs/SettleBack.git
+# or, in an existing clone: git submodule update --init
+
+npm install
+cp config/settleback.example.env .env   # optional; defaults are local and safe
+
+npm run typecheck    # TypeScript across all workspaces
+npm test             # unit tests
+npm run build        # typecheck, web production build, contract build
+
+npm run dev:server   # API on http://127.0.0.1:8787
+npm run dev:web      # web shell on http://127.0.0.1:5173 (proxies /api to the server)
+```
+
+The server runs its TypeScript sources directly with Node's built-in type stripping, so there is no server build step. SQLite and request signing will use Node's built-in `node:sqlite` and `node:crypto`.
+
+| Path | Contents |
+|---|---|
+| `apps/server` | Fastify API |
+| `apps/web` | React + Vite case workspace |
+| `packages/domain` | Shared domain types and rules |
+| `contracts` | Foundry workspace for the recovery registry |
+| `config` | Non-secret configuration examples |
+
+`SETTLEBACK_ENV` selects `local`, `testnet`, `mixed` (testnet payments with the mainnet registry), or `mainnet`. Payment writes are disabled by default. Live environments refuse to enable them until their chain, token, gateway, and finality settings exist.
 
 ## Team
 

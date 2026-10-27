@@ -1,0 +1,101 @@
+[
+  {
+    "id": "seller-eligible-automatic",
+    "title": "Eligible repayment within the seller's active standing policy",
+    "signer": "seller-guard",
+    "policy": { "status": "active", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-11-30T00:00:00Z", "perCaseCapBaseUnits": "1000000", "dailyCapBaseUnits": "4000000" },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "0", "outstandingBaseUnits": "0", "existingAction": "NONE" },
+    "request": { "amountBaseUnits": "1000000" },
+    "expected": { "decision": "SIGN", "reason": "Within the per-case and daily caps of an active, unexpired policy." }
+  },
+  {
+    "id": "seller-daily-cap-exhausted",
+    "title": "Booked plus outstanding exposure would exceed the daily cap",
+    "signer": "seller-guard",
+    "policy": { "status": "active", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-11-30T00:00:00Z", "perCaseCapBaseUnits": "1000000", "dailyCapBaseUnits": "4000000" },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "2500000", "outstandingBaseUnits": "1000000", "existingAction": "NONE" },
+    "request": { "amountBaseUnits": "1000000" },
+    "expected": { "decision": "ROUTE_TO_HUMAN", "reason": "2.5 booked + 1.0 outstanding + 1.0 requested exceeds the 4.0 daily cap; outstanding includes unknown transfers." }
+  },
+  {
+    "id": "seller-per-case-cap",
+    "title": "Repayment above the per-case cap",
+    "signer": "seller-guard",
+    "policy": { "status": "active", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-11-30T00:00:00Z", "perCaseCapBaseUnits": "1000000", "dailyCapBaseUnits": "4000000" },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "0", "outstandingBaseUnits": "0", "existingAction": "NONE" },
+    "request": { "amountBaseUnits": "1500000" },
+    "expected": { "decision": "ROUTE_TO_HUMAN", "reason": "Above the per-case cap; the seller can still approve this case explicitly." }
+  },
+  {
+    "id": "seller-revoked-policy",
+    "title": "Policy revoked by the seller",
+    "signer": "seller-guard",
+    "policy": { "status": "revoked", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-11-30T00:00:00Z", "perCaseCapBaseUnits": "1000000", "dailyCapBaseUnits": "4000000" },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "0", "outstandingBaseUnits": "0", "existingAction": "NONE" },
+    "request": { "amountBaseUnits": "1000000" },
+    "expected": { "decision": "ROUTE_TO_HUMAN", "reason": "Revocation stops new automatic signatures; the case remains open for per-case review." }
+  },
+  {
+    "id": "seller-expired-policy",
+    "title": "Policy past its expiry",
+    "signer": "seller-guard",
+    "policy": { "status": "active", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-10-29T00:00:00Z", "perCaseCapBaseUnits": "1000000", "dailyCapBaseUnits": "4000000" },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "0", "outstandingBaseUnits": "0", "existingAction": "NONE" },
+    "request": { "amountBaseUnits": "1000000" },
+    "expected": { "decision": "ROUTE_TO_HUMAN", "reason": "An expired policy grants no automatic authority." }
+  },
+  {
+    "id": "seller-cross-mode-replay",
+    "title": "Case already reserved under per-case approval",
+    "signer": "seller-guard",
+    "policy": { "status": "active", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-11-30T00:00:00Z", "perCaseCapBaseUnits": "1000000", "dailyCapBaseUnits": "4000000" },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "0", "outstandingBaseUnits": "1000000", "existingAction": "PER_CASE_RESERVED" },
+    "request": { "amountBaseUnits": "1000000" },
+    "expected": { "decision": "REFUSE", "reason": "One case cannot execute in both authorization modes; the existing reservation must be reconciled first." }
+  },
+  {
+    "id": "buyer-within-policy",
+    "title": "Purchase within the buyer's spending policy",
+    "signer": "buyer-guard",
+    "policy": { "status": "active", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-11-30T00:00:00Z", "perPaymentCapBaseUnits": "1000000", "dailyCapBaseUnits": "3000000", "maxFeeBaseUnits": "50000", "payeeAllowlist": ["0x00000000000000000000000000000000000000a1"] },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "0", "outstandingBaseUnits": "0", "existingAttempt": "NONE" },
+    "request": { "amountBaseUnits": "900000", "payee": "0x00000000000000000000000000000000000000a1" },
+    "expected": { "decision": "SIGN", "reason": "0.90 price + 0.05 maximum fee is within the 1.00 gross per-payment cap, to an allowlisted payee." }
+  },
+  {
+    "id": "buyer-over-gross-cap",
+    "title": "Price fits the cap, but price plus maximum fee does not",
+    "signer": "buyer-guard",
+    "policy": { "status": "active", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-11-30T00:00:00Z", "perPaymentCapBaseUnits": "1000000", "dailyCapBaseUnits": "3000000", "maxFeeBaseUnits": "50000", "payeeAllowlist": ["0x00000000000000000000000000000000000000a1"] },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "0", "outstandingBaseUnits": "0", "existingAttempt": "NONE" },
+    "request": { "amountBaseUnits": "1000000", "payee": "0x00000000000000000000000000000000000000a1" },
+    "expected": { "decision": "ROUTE_TO_HUMAN", "reason": "Caps apply to the gross amount: 1.00 + 0.05 exceeds 1.00." }
+  },
+  {
+    "id": "buyer-unlisted-payee",
+    "title": "Payee outside the buyer's allowlist",
+    "signer": "buyer-guard",
+    "policy": { "status": "active", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-11-30T00:00:00Z", "perPaymentCapBaseUnits": "1000000", "dailyCapBaseUnits": "3000000", "maxFeeBaseUnits": "50000", "payeeAllowlist": ["0x00000000000000000000000000000000000000a1"] },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "0", "outstandingBaseUnits": "0", "existingAttempt": "NONE" },
+    "request": { "amountBaseUnits": "500000", "payee": "0x00000000000000000000000000000000000000b2" },
+    "expected": { "decision": "ROUTE_TO_HUMAN", "reason": "Only allowlisted payees are guard-signed; others need the buyer's wallet." }
+  },
+  {
+    "id": "buyer-unknown-prior-attempt",
+    "title": "Second signature requested while the first attempt is unknown",
+    "signer": "buyer-guard",
+    "policy": { "status": "active", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-11-30T00:00:00Z", "perPaymentCapBaseUnits": "1000000", "dailyCapBaseUnits": "3000000", "maxFeeBaseUnits": "50000", "payeeAllowlist": ["0x00000000000000000000000000000000000000a1"] },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "0", "outstandingBaseUnits": "950000", "existingAttempt": "UNKNOWN" },
+    "request": { "amountBaseUnits": "900000", "payee": "0x00000000000000000000000000000000000000a1" },
+    "expected": { "decision": "REFUSE", "reason": "An attempt in an uncertain state is reconciled, never signed again." }
+  },
+  {
+    "id": "buyer-daily-cap-with-unknown",
+    "title": "Unknown payments still count against the daily cap",
+    "signer": "buyer-guard",
+    "policy": { "status": "active", "validFrom": "2026-10-28T00:00:00Z", "validUntil": "2026-11-30T00:00:00Z", "perPaymentCapBaseUnits": "1000000", "dailyCapBaseUnits": "3000000", "maxFeeBaseUnits": "50000", "payeeAllowlist": ["0x00000000000000000000000000000000000000a1"] },
+    "state": { "at": "2026-10-30T10:00:00Z", "bookedTodayBaseUnits": "2000000", "outstandingBaseUnits": "950000", "existingAttempt": "NONE" },
+    "request": { "amountBaseUnits": "900000", "payee": "0x00000000000000000000000000000000000000a1" },
+    "expected": { "decision": "ROUTE_TO_HUMAN", "reason": "2.00 booked + 0.95 unknown + 0.95 gross exceeds the 3.00 daily cap." }
+  }
+]

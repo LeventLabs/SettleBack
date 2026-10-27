@@ -1,0 +1,7 @@
+Northwind Office Supply - price note, October 2026 (synthetic demo data)
+
+We can confirm the following items for your next order.
+The A4 copy paper (SKU NW-1001) remains at 4.20 USD per ream.
+Blue ballpoint pens, box of 50 (SKU NW-2040), are now 9.75 USD.
+The S20 stapler (SKU NW-3307) is discontinued and should not be ordered.
+Recycled notebooks (SKU NW-4112) cost 2.10 USD each.

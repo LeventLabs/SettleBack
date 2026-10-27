@@ -1,0 +1,18 @@
+[
+  {
+    "id": "supplier-price-note",
+    "file": "sources/supplier-price-note.txt",
+    "sourceSha256": "09fed74ec1dfb2c5d983d4e5bfce9f4fba51cf1df9aea4eb385673338771ee42",
+    "expectedArtifact": {
+      "schema": "settleback.extraction.v1",
+      "sourceId": "supplier-price-note",
+      "items": [
+        { "sku": "NW-1001", "name": "A4 copy paper", "unitPriceUsd": "4.20", "status": "available" },
+        { "sku": "NW-2040", "name": "Blue ballpoint pens, box of 50", "unitPriceUsd": "9.75", "status": "available" },
+        { "sku": "NW-3307", "name": "S20 stapler", "unitPriceUsd": null, "status": "discontinued" },
+        { "sku": "NW-4112", "name": "Recycled notebooks", "unitPriceUsd": "2.10", "status": "available" }
+      ]
+    },
+    "expectedArtifactSha256": "4b2661adfe637a7eacb81fee1f651e33c5a6eabdedb32de310e20af29c6a1a7f"
+  }
+]

@@ -68,9 +68,12 @@ The server runs its TypeScript sources directly with Node's built-in type stripp
 |---|---|
 | `apps/server` | Fastify API |
 | `apps/web` | React + Vite case workspace |
-| `packages/domain` | Shared domain types and rules |
+| `packages/domain` | Shared domain types and rules, canonical JSON and SHA-256 helpers |
+| `fixtures` | Synthetic service terms, a source document with its expected result, labeled recovery cases, and signing-policy cases |
 | `contracts` | Foundry workspace for the recovery registry |
 | `config` | Non-secret configuration examples |
+
+All fixture data is synthetic. The recovery cases describe what each component must record and the expected outcome; the evidence itself is produced by running the demo service with injected faults, not written by hand. The only exception is buyer claims, which are labeled as hand-written.
 
 `SETTLEBACK_ENV` selects `local`, `testnet`, `mixed` (testnet payments with the mainnet registry), or `mainnet`. Payment writes are disabled by default. Live environments refuse to enable them until their chain, token, gateway, and finality settings exist.
 

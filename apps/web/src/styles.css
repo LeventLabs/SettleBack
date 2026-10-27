@@ -74,3 +74,8 @@ body {
   border-radius: 999px;
   font-size: 0.875rem;
 }
+
+.badge--simulated {
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}

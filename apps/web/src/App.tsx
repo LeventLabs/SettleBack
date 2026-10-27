@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 interface Health {
   environment: string;
+  mode: "simulated" | "live";
   networkLabel: string;
   paymentWrites: "enabled" | "disabled";
 }
@@ -16,6 +17,7 @@ function isHealth(value: unknown): value is Health {
   const record = value as Record<string, unknown>;
   return (
     typeof record.environment === "string" &&
+    (record.mode === "simulated" || record.mode === "live") &&
     typeof record.networkLabel === "string" &&
     (record.paymentWrites === "enabled" || record.paymentWrites === "disabled")
   );
@@ -53,6 +55,12 @@ export function App() {
         )}
         {state.status === "ready" && (
           <dl className="status">
+            <dt>Mode</dt>
+            <dd>
+              <span className={state.health.mode === "simulated" ? "badge badge--simulated" : "badge"}>
+                {state.health.mode === "simulated" ? "Simulation, no real funds" : "Live"}
+              </span>
+            </dd>
             <dt>Network</dt>
             <dd>
               <span className="badge">{state.health.networkLabel}</span>

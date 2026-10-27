@@ -10,7 +10,14 @@ describe("loadConfig", () => {
       logLevel: "info",
       paymentWritesEnabled: false,
       databasePath: expect.stringMatching(/\/data\/settleback-local\.db$/),
+      simulatedProfile: "testnet",
     });
+  });
+
+  it("accepts a simulated profile only in the local environment", () => {
+    expect(loadConfig({ SETTLEBACK_SIM_PROFILE: "mixed" }).simulatedProfile).toBe("mixed");
+    expect(() => loadConfig({ SETTLEBACK_SIM_PROFILE: "local" })).toThrow(/Unknown network profile/);
+    expect(() => loadConfig({ SETTLEBACK_ENV: "testnet", SETTLEBACK_SIM_PROFILE: "testnet" })).toThrow(/only to the local environment/);
   });
 
   it("uses a separate default database per environment and honors an explicit path", () => {

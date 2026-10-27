@@ -3,7 +3,7 @@ import { buildApp } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 
 describe("GET /api/health", () => {
-  it("reports the environment, its network label, and the payment-write state", async () => {
+  it("reports a live environment's profile, chains, and payment-write state", async () => {
     const app = buildApp(loadConfig({ SETTLEBACK_ENV: "mixed", SETTLEBACK_LOG_LEVEL: "silent" }));
     try {
       const response = await app.inject({ method: "GET", url: "/api/health" });
@@ -11,9 +11,38 @@ describe("GET /api/health", () => {
       expect(response.json()).toEqual({
         service: "settleback",
         environment: "mixed",
+        mode: "live",
+        networkProfile: "mixed",
         networkLabel: "mixed-network: testnet payment, mainnet registry",
+        paymentChainId: 133,
+        registryChainId: 177,
         paymentWrites: "disabled",
       });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("marks the local environment as a simulation of its configured profile", async () => {
+    const app = buildApp(loadConfig({ SETTLEBACK_SIM_PROFILE: "mainnet", SETTLEBACK_LOG_LEVEL: "silent" }));
+    try {
+      const body = (await app.inject({ method: "GET", url: "/api/health" })).json();
+      expect(body).toMatchObject({ environment: "local", mode: "simulated", networkProfile: "mainnet", networkLabel: "local simulation (mainnet)" });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("response headers", () => {
+  it("carry the mode and network profile on every response, including errors", async () => {
+    const app = buildApp(loadConfig({ SETTLEBACK_LOG_LEVEL: "silent" }));
+    try {
+      for (const url of ["/api/health", "/api/does-not-exist"]) {
+        const response = await app.inject({ method: "GET", url });
+        expect(response.headers["x-settleback-mode"], url).toBe("simulated");
+        expect(response.headers["x-settleback-network"], url).toBe("testnet");
+      }
     } finally {
       await app.close();
     }

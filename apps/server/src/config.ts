@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { parseEnvironment, type Environment } from "@settleback/domain";
+import { parseEnvironment, parseNetworkProfile, type Environment, type NetworkProfile } from "@settleback/domain";
 
 const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
 const DEFAULT_DATA_DIR = fileURLToPath(new URL("../../../data/", import.meta.url));
@@ -14,6 +14,8 @@ export interface ServerConfig {
   paymentWritesEnabled: boolean;
   /** One database per environment so records from different networks never mix. */
   databasePath: string;
+  /** Which live profile the local simulation imitates; meaningless and refused elsewhere. */
+  simulatedProfile: NetworkProfile;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
@@ -29,8 +31,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     );
   }
 
+  if (env.SETTLEBACK_SIM_PROFILE !== undefined && environment !== "local") {
+    throw new Error(`SETTLEBACK_SIM_PROFILE applies only to the local environment, not "${environment}".`);
+  }
+
   return {
     environment,
+    simulatedProfile: parseNetworkProfile(env.SETTLEBACK_SIM_PROFILE ?? "testnet"),
     host: env.SETTLEBACK_HOST ?? "127.0.0.1",
     port: parsePort(env.SETTLEBACK_PORT ?? "8787"),
     logLevel: parseLogLevel(env.SETTLEBACK_LOG_LEVEL ?? "info"),

@@ -70,10 +70,13 @@ The server runs its TypeScript sources directly with Node's built-in type stripp
 | `apps/web` | React + Vite case workspace |
 | `packages/domain` | Shared domain types, state machines with per-transition actor rules, deterministic recovery checks, canonical JSON and SHA-256 helpers |
 | `packages/adapters` | Payment and registry interfaces, webhook signature verification, settlement verification against the chain, and deterministic simulators with fault injection |
+| `packages/demo-service` | The paid extraction job: an edge proxy, a job service, a worker, and an artifact store, each keeping its own records, run in simulated time with injectable faults |
 | `fixtures` | Synthetic service terms, a source document with its expected result, labeled recovery cases, and signing-policy cases |
 | `migrations` | SQLite schema; applied in order at startup and refused if an applied file changes |
 | `contracts` | Foundry workspace for the recovery registry |
 | `config` | Non-secret configuration examples |
+
+The demo service performs the purchased work for real: it extracts structured items from the source document and stores the result by its SHA-256 digest. The edge writes nginx-style access lines, the worker writes its own application log under its own job alias and clock, and the job service keeps a structured status whose every change goes through the job state machine. A job starts at most once per operation and is never restarted after an uncertain run. Faults are injected as component behavior (a dropped response, a terminal failure, an edge timeout while the worker finishes late, a lost status update, a corrupted artifact), so disagreeing records come from components that actually disagree.
 
 All fixture data is synthetic. The recovery cases describe what each component must record and the expected outcome; the evidence itself is produced by running the demo service with injected faults, not written by hand. The only exception is buyer claims, which are labeled as hand-written.
 

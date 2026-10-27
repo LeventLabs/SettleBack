@@ -12,5 +12,8 @@
   "dependencies": {
     "@settleback/domain": "0.0.0",
     "fastify": "5.12.7"
+  },
+  "devDependencies": {
+    "@settleback/fixtures": "0.0.0"
   }
 }

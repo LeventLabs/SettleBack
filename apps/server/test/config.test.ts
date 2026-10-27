@@ -9,7 +9,13 @@ describe("loadConfig", () => {
       port: 8787,
       logLevel: "info",
       paymentWritesEnabled: false,
+      databasePath: expect.stringMatching(/\/data\/settleback-local\.db$/),
     });
+  });
+
+  it("uses a separate default database per environment and honors an explicit path", () => {
+    expect(loadConfig({ SETTLEBACK_ENV: "testnet" }).databasePath).toMatch(/\/data\/settleback-testnet\.db$/);
+    expect(loadConfig({ SETTLEBACK_DB_PATH: "/tmp/x.db" }).databasePath).toBe("/tmp/x.db");
   });
 
   it("rejects unknown environments, ports, log levels, and payment-write values", () => {

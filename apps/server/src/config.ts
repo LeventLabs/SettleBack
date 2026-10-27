@@ -1,6 +1,8 @@
+import { fileURLToPath } from "node:url";
 import { parseEnvironment, type Environment } from "@settleback/domain";
 
 const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
+const DEFAULT_DATA_DIR = fileURLToPath(new URL("../../../data/", import.meta.url));
 
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
@@ -10,6 +12,8 @@ export interface ServerConfig {
   port: number;
   logLevel: LogLevel;
   paymentWritesEnabled: boolean;
+  /** One database per environment so records from different networks never mix. */
+  databasePath: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
@@ -31,6 +35,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: parsePort(env.SETTLEBACK_PORT ?? "8787"),
     logLevel: parseLogLevel(env.SETTLEBACK_LOG_LEVEL ?? "info"),
     paymentWritesEnabled,
+    databasePath: env.SETTLEBACK_DB_PATH ?? `${DEFAULT_DATA_DIR}settleback-${environment}.db`,
   };
 }
 

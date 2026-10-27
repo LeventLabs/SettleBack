@@ -1,8 +1,13 @@
 import { buildApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
+import { openDatabase } from "./db/database.ts";
 
 const config = loadConfig();
+const db = openDatabase({ path: config.databasePath, environment: config.environment });
 const app = buildApp(config);
+app.addHook("onClose", async () => {
+  db.close();
+});
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
@@ -19,6 +24,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 
 try {
   await app.listen({ host: config.host, port: config.port });
+  app.log.info({ databasePath: config.databasePath }, "database ready");
 } catch (error) {
   app.log.error(error, "failed to start");
   process.exit(1);

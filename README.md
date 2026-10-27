@@ -70,10 +70,13 @@ The server runs its TypeScript sources directly with Node's built-in type stripp
 | `apps/web` | React + Vite case workspace |
 | `packages/domain` | Shared domain types and rules, canonical JSON and SHA-256 helpers |
 | `fixtures` | Synthetic service terms, a source document with its expected result, labeled recovery cases, and signing-policy cases |
+| `migrations` | SQLite schema; applied in order at startup and refused if an applied file changes |
 | `contracts` | Foundry workspace for the recovery registry |
 | `config` | Non-secret configuration examples |
 
 All fixture data is synthetic. The recovery cases describe what each component must record and the expected outcome; the evidence itself is produced by running the demo service with injected faults, not written by hand. The only exception is buyer claims, which are labeled as hand-written.
+
+Each environment uses its own SQLite database (default `data/settleback-<environment>.db`, ignored by git). A database records the environment it was created for and cannot be opened under another one. The schema enforces the core money rules itself: amounts are positive integer strings in token base units, recorded payment terms and transaction hashes cannot change, each settlement proof can be bound only once, and every update to a mutable record advances its revision by exactly one.
 
 `SETTLEBACK_ENV` selects `local`, `testnet`, `mixed` (testnet payments with the mainnet registry), or `mainnet`. Payment writes are disabled by default. Live environments refuse to enable them until their chain, token, gateway, and finality settings exist.
 

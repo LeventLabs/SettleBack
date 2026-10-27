@@ -50,6 +50,42 @@ export class ProofAlreadyAllocatedError extends StoreError {
   }
 }
 
+export class OperationNotFoundError extends StoreError {
+  constructor(operationId: string) {
+    super("OPERATION_NOT_FOUND", `Operation ${operationId} does not exist.`);
+  }
+}
+
+export class CaseNotFoundError extends StoreError {
+  constructor(caseId: string) {
+    super("CASE_NOT_FOUND", `Case ${caseId} does not exist.`);
+  }
+}
+
+export class CaseOpenForbiddenError extends StoreError {
+  constructor(message: string) {
+    super("ROLE_FORBIDDEN", message);
+  }
+}
+
+export class EvidenceConflictError extends StoreError {
+  constructor(source: string, sourceEventId: string) {
+    super("EVIDENCE_CONFLICT", `${source} event ${sourceEventId} was already recorded with different content; the rejected digest is in the audit log.`);
+  }
+}
+
+export class EvidenceLimitError extends StoreError {
+  constructor(message: string) {
+    super("EVIDENCE_LIMIT", message);
+  }
+}
+
+export class EvidenceIntegrityError extends StoreError {
+  constructor(message: string) {
+    super("EVIDENCE_INTEGRITY", message);
+  }
+}
+
 const SQLITE_CONSTRAINT_PRIMARYKEY = 1555;
 const SQLITE_CONSTRAINT_UNIQUE = 2067;
 

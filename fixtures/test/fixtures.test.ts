@@ -7,6 +7,7 @@ import {
   fixturePath,
   loadAuthorizationFixtures,
   loadCases,
+  loadPolicyTerms,
   loadPolicyText,
   loadSourceBytes,
   loadSources,
@@ -84,12 +85,24 @@ describe("cases", () => {
     }
   });
 
-  it("allow hand-written evidence only for buyer claims", () => {
+  it("allow hand-written evidence only for buyer claims, and give each its text", () => {
     for (const fixture of cases) {
       for (const evidence of fixture.evidence) {
         if (evidence.handWritten) expect(evidence.source, fixture.id).toBe("buyer-claim");
+        expect(evidence.text !== undefined, fixture.id).toBe(evidence.handWritten === true);
       }
     }
+  });
+
+  it("give every case's policy machine-readable terms pinned to the policy text", () => {
+    const policyTerms = loadPolicyTerms();
+    for (const terms of policyTerms) expect(terms.sha256, terms.id).toBe(sha256Hex(loadPolicyText(terms.id)));
+    const ids = new Set(policyTerms.map((terms) => terms.id));
+    for (const fixture of cases) expect(ids.has(fixture.policyId), fixture.id).toBe(true);
+    expect(Object.fromEntries(policyTerms.map((terms) => [terms.id, terms.refundRule]))).toEqual({
+      "extraction-delivery-v1": "TERMINAL_FAILURE_BEFORE_ARTIFACT",
+      "extraction-compute-billable-v1": "FAILURE_BEFORE_COMPUTE",
+    });
   });
 
   it("set an authorization mode exactly on repayment cases and cover both modes", () => {

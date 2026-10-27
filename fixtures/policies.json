@@ -1,0 +1,26 @@
+[
+  {
+    "id": "extraction-delivery-v1",
+    "file": "policies/extraction-delivery-v1.md",
+    "sha256": "6374ffe2ba435e32adcc14b8206a495b1728600c95e63e648f86ceb489574262",
+    "refundRule": "TERMINAL_FAILURE_BEFORE_ARTIFACT",
+    "clauses": {
+      "delivery": "1",
+      "refund": "2",
+      "timeout": "3",
+      "evidence": "4"
+    }
+  },
+  {
+    "id": "extraction-compute-billable-v1",
+    "file": "policies/extraction-compute-billable-v1.md",
+    "sha256": "6da2e8f10178861d7dffd19304241c45e592adbccca52e78093ae164ee35b4aa",
+    "refundRule": "FAILURE_BEFORE_COMPUTE",
+    "clauses": {
+      "delivery": "1",
+      "refund": "2",
+      "timeout": "3",
+      "evidence": "4"
+    }
+  }
+]

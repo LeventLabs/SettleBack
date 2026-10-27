@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import { ManualClock } from "@settleback/adapters";
 import { loadCases, loadSourceBytes, loadSources } from "@settleback/fixtures";
 import {
+  GATEWAY_SCENARIOS,
   JobService,
   MemoryArtifactStore,
   SERVICE_SCENARIOS,
   Scheduler,
   Worker,
   runServiceScenario,
+  serviceStatusEvidence,
   type ScenarioRun,
   type ServiceEvidenceSource,
 } from "../src/index.ts";
@@ -17,11 +19,8 @@ if (source === undefined) throw new Error("fixture source missing");
 const text = loadSourceBytes(source).toString("utf8");
 const SERVICE_SOURCES: readonly string[] = ["edge-log", "worker-log", "service-status", "artifact-store"];
 
-/**
- * Cases whose fault is on the gateway side. No job runs, so the only service-side evidence is
- * the absence of an invocation, read from the job service by the case builder, not simulated here.
- */
-const GATEWAY_SIDE_CASES: readonly string[] = ["lost-payment-notification", "payment-never-broadcast"];
+/** Cases whose fault is on the gateway side; no job runs, and the gateway simulator produces their payment evidence. */
+const GATEWAY_SIDE_CASES: readonly string[] = Object.keys(GATEWAY_SCENARIOS);
 
 function run(caseId: string): ScenarioRun {
   const faults = SERVICE_SCENARIOS[caseId];
@@ -47,9 +46,9 @@ function workerTime(line: string, offsetMs: number): number {
 describe("fixture coverage", () => {
   const cases = loadCases();
 
-  it("maps only to real fixture cases", () => {
-    const ids = new Set(cases.map((c) => c.id));
-    for (const id of Object.keys(SERVICE_SCENARIOS)) expect(ids.has(id), id).toBe(true);
+  it("maps every fixture case to exactly one service or gateway scenario", () => {
+    const ids = cases.map((c) => c.id).sort();
+    expect([...Object.keys(SERVICE_SCENARIOS), ...GATEWAY_SIDE_CASES].sort()).toEqual(ids);
   });
 
   it("has a scenario for every case whose evidence comes from the service, and produces every source the case needs", () => {
@@ -76,6 +75,10 @@ describe("fixture coverage", () => {
     const jobs = new JobService(scheduler, new Worker(scheduler, new MemoryArtifactStore()));
     expect(jobs.status("op-never-started")).toBeUndefined();
     expect(jobs.invocations("op-never-started")).toBe(0);
+    // The service reports "no job" as a record in its usual status format, not as missing evidence.
+    const record = JSON.parse(serviceStatusEvidence("op-never-started", jobs.status("op-never-started")).content);
+    expect(record).toEqual({ operationId: "op-never-started", externalJobId: null, state: "NOT_STARTED", artifactSha256: null, computeStarted: false, history: [] });
+    expect(() => serviceStatusEvidence("op-other", run("lost-response").status)).toThrow(/another operation/);
   });
 
   it("is deterministic: the same scenario yields byte-identical evidence", () => {

@@ -5,7 +5,8 @@ import type { Worker, WorkerFaults, WorkerJob, WorkerReport } from "./worker.ts"
 
 export interface JobStatusRecord {
   operationId: string;
-  externalJobId: string;
+  /** Null only when the service has no job for the operation. */
+  externalJobId: string | null;
   state: ServiceJobState;
   artifactSha256: string | null;
   computeStarted: boolean;
@@ -44,7 +45,7 @@ export class JobService {
 
     const record: JobStatusRecord = {
       operationId,
-      externalJobId: `wk-${createHash("sha256").update(operationId).digest("hex").slice(0, 8)}`,
+      externalJobId: alias(operationId),
       state: "NOT_STARTED",
       artifactSha256: null,
       computeStarted: false,
@@ -54,7 +55,7 @@ export class JobService {
     this.move(record, "INVOKED", "server");
     this.invocationCounts.set(operationId, (this.invocationCounts.get(operationId) ?? 0) + 1);
 
-    const job: WorkerJob = { alias: record.externalJobId, ...request };
+    const job: WorkerJob = { alias: alias(operationId), ...request };
     this.worker.start(job, faults, (update) => this.onReport(record, update));
     return clone(record);
   }
@@ -116,6 +117,10 @@ export class JobService {
   private notify(record: JobStatusRecord): void {
     for (const listener of this.listeners.get(record.operationId) ?? []) listener(clone(record));
   }
+}
+
+function alias(operationId: string): string {
+  return `wk-${createHash("sha256").update(operationId).digest("hex").slice(0, 8)}`;
 }
 
 function clone(record: JobStatusRecord): JobStatusRecord {

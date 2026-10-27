@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import type { PolicyTerms } from "@settleback/domain";
+import { sha256Hex } from "@settleback/domain/hash";
 import {
   AUTHORIZATION_MODES,
   CASE_CATEGORIES,
@@ -44,6 +46,11 @@ export function loadAuthorizationFixtures(): AuthorizationFixture[] {
   return readJsonArray("authorization.json").map((value, index) =>
     parseAuthorization(value, `authorization.json[${index}]`),
   );
+}
+
+/** Machine-readable terms for each fixture policy, checked against the policy text they describe. */
+export function loadPolicyTerms(): PolicyTerms[] {
+  return readJsonArray("policies.json").map((value, index) => parsePolicyTerms(value, `policies.json[${index}]`));
 }
 
 export function loadPolicyText(policyId: string): string {
@@ -92,6 +99,27 @@ function parseCase(value: unknown, where: string): FixtureCase {
   return parsed;
 }
 
+function parsePolicyTerms(value: unknown, where: string): PolicyTerms {
+  const o = obj(value, where);
+  const policyId = id(o, "id", where);
+  if (str(o, "file", where) !== `policies/${policyId}.md`) throw new Error(`${where}.file: expected policies/${policyId}.md`);
+  const text = loadPolicyText(policyId);
+  const sha256 = matching(o, "sha256", SHA256_HEX, where);
+  if (sha256Hex(text) !== sha256) throw new Error(`${where}.sha256: does not match policies/${policyId}.md`);
+  const clauses = obj(o.clauses, `${where}.clauses`);
+  const clause = (key: string): string => {
+    const number = matching(clauses, key, /^[1-9][0-9]*$/, `${where}.clauses`);
+    if (!new RegExp(`^${number}\\. `, "m").test(text)) throw new Error(`${where}.clauses.${key}: clause ${number} is not in the policy text`);
+    return number;
+  };
+  return {
+    id: policyId,
+    sha256,
+    refundRule: oneOf(o, "refundRule", ["TERMINAL_FAILURE_BEFORE_ARTIFACT", "FAILURE_BEFORE_COMPUTE"] as const, where),
+    clauses: { delivery: clause("delivery"), refund: clause("refund"), timeout: clause("timeout"), evidence: clause("evidence") },
+  };
+}
+
 function parseFault(value: unknown, where: string): Fault {
   const o = obj(value, where);
   return {
@@ -117,6 +145,9 @@ function parseEvidence(value: unknown, where: string): EvidenceSpec {
   if (o.handWritten !== undefined) {
     if (o.handWritten !== true) throw new Error(`${where}.handWritten: only true is meaningful`);
     spec.handWritten = true;
+    spec.text = str(o, "text", where);
+  } else if (o.text !== undefined) {
+    throw new Error(`${where}.text: only hand-written evidence carries text; the rest is produced by running components`);
   }
   return spec;
 }

@@ -47,6 +47,8 @@ export interface EvidenceSpec {
   jobAlias?: string;
   clockOffsetMs?: number;
   handWritten?: boolean;
+  /** The hand-written text; present exactly when `handWritten` is set. */
+  text?: string;
 }
 
 export interface Citation {

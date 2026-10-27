@@ -45,6 +45,8 @@ export interface ServiceEvidence {
 export interface ScenarioRun {
   operationId: string;
   requestId: string;
+  /** Simulated time at which the records were collected. */
+  capturedAt: string;
   status: JobStatusRecord;
   invocations: number;
   store: MemoryArtifactStore;
@@ -79,10 +81,36 @@ export function runServiceScenario(input: ScenarioInput): ScenarioRun {
   const evidence: ServiceEvidence[] = [
     item("edge-log", "edge", "nginx access log with request and operation fields", edge.log.join("\n")),
     item("worker-log", "worker", "worker application log (own job alias and clock)", worker.log.join("\n")),
-    item("service-status", "worker", "structured job status (JSON)", JSON.stringify(status, null, 2)),
+    serviceStatusEvidence(input.operationId, status),
     item("artifact-store", "artifact-store", "artifact store records (JSON)", JSON.stringify(store.list(), null, 2)),
   ];
-  return { operationId: input.operationId, requestId: input.requestId, status, invocations: service.invocations(input.operationId), store, service, evidence };
+  return {
+    operationId: input.operationId,
+    requestId: input.requestId,
+    capturedAt: clock.now().toISOString(),
+    status,
+    invocations: service.invocations(input.operationId),
+    store,
+    service,
+    evidence,
+  };
+}
+
+/**
+ * The job service's structured status for an operation. When it has no job, it says so in the
+ * same format, so "never invoked" is a record from the service rather than an absence of records.
+ */
+export function serviceStatusEvidence(operationId: string, status: JobStatusRecord | undefined): ServiceEvidence {
+  const record: JobStatusRecord = status ?? {
+    operationId,
+    externalJobId: null,
+    state: "NOT_STARTED",
+    artifactSha256: null,
+    computeStarted: false,
+    history: [],
+  };
+  if (record.operationId !== operationId) throw new Error("status belongs to another operation");
+  return item("service-status", "worker", "structured job status (JSON)", JSON.stringify(record, null, 2));
 }
 
 function item(source: ServiceEvidenceSource, producedBy: ServiceEvidence["producedBy"], format: string, content: string): ServiceEvidence {

@@ -55,6 +55,22 @@ export function immediateTransaction<T>(db: DatabaseSync, work: () => T): T {
   }
 }
 
+/** Runs several reads against one consistent snapshot, so a concurrent writer cannot interleave. */
+export function readTransaction<T>(db: DatabaseSync, work: () => T): T {
+  if (db.isTransaction) {
+    throw new Error("Nested transactions are not supported");
+  }
+  db.exec("BEGIN DEFERRED");
+  try {
+    const result = work();
+    db.exec("COMMIT");
+    return result;
+  } catch (error) {
+    if (db.isTransaction) db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 export function migrate(db: DatabaseSync, migrationsDir: string, now: () => string): string[] {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,

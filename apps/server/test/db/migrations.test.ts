@@ -1,4 +1,4 @@
-import { appendFileSync, cpSync, mkdirSync } from "node:fs";
+import { appendFileSync, cpSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MIGRATIONS_DIR, openDatabase } from "../../src/db/database.ts";
@@ -10,6 +10,7 @@ const EXPECTED_TABLES = [
   "cases",
   "delivery_acks",
   "events",
+  "evidence_contents",
   "evidence_items",
   "execution_permits",
   "idempotency_records",
@@ -48,7 +49,9 @@ describe("openDatabase", () => {
       openDatabase({ path, environment: "local", now: () => NOW }).close();
       const db = openDatabase({ path, environment: "local", now: () => NOW });
       try {
-        expect(db.prepare("SELECT count(*) AS n FROM schema_migrations").get()?.n).toBe(1);
+        const files = readdirSync(MIGRATIONS_DIR).filter((name) => name.endsWith(".sql"));
+        expect(files.length).toBeGreaterThan(1);
+        expect(db.prepare("SELECT count(*) AS n FROM schema_migrations").get()?.n).toBe(files.length);
         expect(db.prepare("PRAGMA journal_mode").get()?.journal_mode).toBe("wal");
       } finally {
         db.close();

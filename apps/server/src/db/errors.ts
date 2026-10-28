@@ -94,3 +94,21 @@ export function isUniqueViolation(error: unknown): boolean {
   const errcode = (error as { errcode?: unknown }).errcode;
   return errcode === SQLITE_CONSTRAINT_UNIQUE || errcode === SQLITE_CONSTRAINT_PRIMARYKEY;
 }
+
+export class AssessmentForbiddenError extends StoreError {
+  constructor(message: string) {
+    super("ROLE_FORBIDDEN", message);
+  }
+}
+
+export class CaseNotAssessableError extends StoreError {
+  constructor(caseId: string, status: string) {
+    super("CASE_NOT_READY", `Case ${caseId} is ${status}; only an open case or one under assessment or review can be assessed.`);
+  }
+}
+
+export class AssessmentInProgressError extends StoreError {
+  constructor(caseId: string) {
+    super("ASSESSMENT_IN_PROGRESS", `Case ${caseId} already has an assessment in progress for this evidence revision.`);
+  }
+}

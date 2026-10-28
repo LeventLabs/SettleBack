@@ -32,7 +32,7 @@ A repayment is a new seller-funded transfer, not a reversal. Payment evidence do
 
 ## Current status
 
-**Early development.** The domain rules, payment and registry simulators, the instrumented demo service, and evidence-backed cases with a rules-only assessment are in place and tested locally. The Claude assessment, recovery execution, the case interface, live HSP integration, and deployment references will follow as they are implemented.
+**Early development.** The domain rules, payment and registry simulators, the instrumented demo service, evidence-backed cases with a rules-only assessment, and a cited Claude assessment for the cases the rules cannot settle are in place and tested locally. Recovery execution, the case interface, live HSP integration, and deployment references will follow as they are implemented.
 
 The MVP targets:
 
@@ -53,6 +53,7 @@ git clone --recurse-submodules https://github.com/LeventLabs/SettleBack.git
 
 npm install
 cp config/settleback.example.env .env   # optional; defaults are local and safe
+# add ANTHROPIC_API_KEY to .env to enable assessments; .env is ignored by git
 
 npm run typecheck    # TypeScript across all workspaces
 npm test             # unit tests
@@ -66,9 +67,9 @@ The server runs its TypeScript sources directly with Node's built-in type stripp
 
 | Path | Contents |
 |---|---|
-| `apps/server` | Fastify API |
+| `apps/server` | Fastify API, SQLite storage, and the Claude assessment client |
 | `apps/web` | React + Vite case workspace |
-| `packages/domain` | Shared domain types, state machines with per-transition actor rules, deterministic recovery checks, evidence validation and redaction, cited spans, the rules-only assessment, canonical JSON and SHA-256 helpers |
+| `packages/domain` | Shared domain types, state machines with per-transition actor rules, deterministic recovery checks, evidence validation and redaction, cited spans, the rules-only assessment, validation and decision rules for the model assessment, canonical JSON and SHA-256 helpers |
 | `packages/adapters` | Payment and registry interfaces, webhook signature verification, settlement verification against the chain, and deterministic simulators with fault injection |
 | `packages/demo-service` | The paid extraction job: an edge proxy, a job service, a worker, and an artifact store, each keeping its own records, run in simulated time with injectable faults |
 | `fixtures` | Synthetic service terms with their machine-readable refund rules, a source document with its expected result, labeled recovery cases, and signing-policy cases |
@@ -85,6 +86,8 @@ Each environment uses its own SQLite database (default `data/settleback-<environ
 Each operation has at most one case, however many times or by whom it is opened; only the operation's buyer or an operator can open it. Evidence is recorded as immutable items, and its trust level comes from who submitted it, never from what it says: records from the configured service identity are authenticated service records (still the seller's own assertions), gateway and chain records come from server-side reconciliation, and anything a person types or pastes is a claim, even when it looks like a worker log. The bound service terms are always the first item, so their clauses can be cited like any other record. Only plain text and JSON are accepted: at most 20 items, 256 KiB each, and 1 MiB per case, with claims limited to half of each budget so they cannot crowd out service records. Control characters and malformed text are refused, HTML and scripts are stored as inert text, and credentials (private keys, bearer tokens, cookies, API keys, and secret-named fields) are redacted before anything is stored or shown; the digest of the submitted bytes is kept alongside the digest of the stored text. Redaction is pattern-based, not a guarantee. Resubmitting an event with different content is refused and logged rather than overwriting it, and every new item advances the case's evidence revision, which sends a case that is still under review back for reassessment and makes any earlier approval stale.
 
 A rules-only assessment runs before any model is involved. It reads only structured records from trusted sources (the payment attempt, the job service's status, the artifact store, and gateway records) and never free-text logs or claims. It resolves straightforward cases: a completed artifact that matches its digest and its job can be retrieved, a terminal failure before any artifact is repayable under delivery-based terms, started compute stays billable under compute-billable terms, a verified payment with no job can be fulfilled once, and a payment that never produced a transaction needs no action. Contradicting records, such as an artifact whose bytes no longer match, are escalated. When the records do not settle the case, for example when the job's last structured status is still running while its own log says it finished, the rules abstain and say what evidence is missing; a missing record is never read as proof that a job did not run. Every finding cites exact byte ranges of the stored evidence, and the citations are checked the same way any later model citation will be. The fixture cases run end to end against this path: their evidence comes from running the demo service and the gateway simulator, not from hand-written logs.
+
+When the rules abstain, the seller or an operator can request a Claude assessment of that evidence revision. Claude (pinned to `claude-opus-5-5` by default, structured output, no tools) reads the free-text records and the terms and returns findings with verbatim quotes, a suggested action, and the evidence that is missing. Evidence is passed as data inside delimiters the evidence cannot close, and nothing the model returns is trusted as is. The server finds every quote in the item it names and stores the byte range it found, rejects the whole response if any quote is absent or a claim is presented as proof, and records a refusal, a truncated or malformed response, a timeout, or an answer from a different model as a failed assessment that leaves the case with a person. There is no automatic retry and no fallback model; a person can retry a failed attempt, and a successful one is reused for its revision. A suggested repayment is never eligible on the model's word. A suggested retrieval becomes eligible only after code looks up the artifact digest the model quoted from an authenticated record and confirms with the artifact store and the job service that the artifact exists unaltered and was written by this operation's job; a log line naming a digest is a lead, not proof. Every request and result is stored append-only with its prompt digest, model, origin (live, recorded, or scripted test input), raw response, token usage, and duration.
 
 State changes for payments, jobs, cases, and recovery actions go through explicit state machines. Each transition lists who may make it and whether it must cite recorded evidence. The language model is not an actor on any transition, only server-side reconciliation can mark a payment verified, and an unknown payment can never be released for a fresh attempt automatically.
 

@@ -1,12 +1,14 @@
-import { appendFileSync, cpSync, mkdirSync, readdirSync } from "node:fs";
+import { appendFileSync, copyFileSync, cpSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { MIGRATIONS_DIR, openDatabase } from "../../src/db/database.ts";
 import { EnvironmentMismatchError, MigrationError } from "../../src/db/errors.ts";
 import { NOW, memoryDatabase, withTempDir } from "./helpers.ts";
 
 const EXPECTED_TABLES = [
-  "assessments",
+  "assessment_requests",
+  "assessment_results",
   "cases",
   "delivery_acks",
   "events",
@@ -89,6 +91,31 @@ describe("openDatabase", () => {
       expect(() => openDatabase({ path, environment: "local", migrationsDir: emptyMigrations, now: () => NOW })).toThrow(
         MigrationError,
       );
+    });
+  });
+
+  it("will not drop the placeholder assessments table if it ever held rows", () => {
+    withTempDir((dir) => {
+      const migrationsDir = join(dir, "migrations");
+      mkdirSync(migrationsDir);
+      for (const name of ["0001_core.sql", "0002_evidence_contents.sql"]) copyFileSync(join(MIGRATIONS_DIR, name), join(migrationsDir, name));
+      const path = join(dir, "settleback.db");
+      const db = openDatabase({ path, environment: "local", migrationsDir, now: () => NOW });
+      db.exec("PRAGMA foreign_keys = OFF");
+      db.exec(
+        `INSERT INTO assessments (id, case_id, case_revision, policy_sha256, provider, model, prompt_version, validation_status, findings_json, created_at)
+         VALUES ('a1', 'missing-case', 0, '${"0".repeat(64)}', 'p', 'm', 'v', 'FAILED', '[]', '${NOW}')`,
+      );
+      db.close();
+      copyFileSync(join(MIGRATIONS_DIR, "0003_assessments.sql"), join(migrationsDir, "0003_assessments.sql"));
+      expect(() => openDatabase({ path, environment: "local", migrationsDir, now: () => NOW })).toThrow(/CHECK constraint failed/);
+      const raw = new DatabaseSync(path);
+      try {
+        expect(raw.prepare("SELECT count(*) AS n FROM assessments").get()?.n).toBe(1);
+        expect(raw.prepare("SELECT max(version) AS v FROM schema_migrations").get()?.v).toBe(2);
+      } finally {
+        raw.close();
+      }
     });
   });
 });

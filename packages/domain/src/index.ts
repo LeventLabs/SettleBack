@@ -1,3 +1,4 @@
+export * from "./assessment.ts";
 export * from "./baseline.ts";
 export * from "./environment.ts";
 export * from "./evidence.ts";

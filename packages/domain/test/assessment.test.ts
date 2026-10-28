@@ -5,6 +5,7 @@ import {
   buildAssessmentPrompt,
   checkSpan,
   decideAssessment,
+  readArtifactLead,
   validateAssessment,
   type ArtifactLead,
   type AssessmentSnapshot,
@@ -220,5 +221,16 @@ describe("assessment decision", () => {
     expect(codes(decide({}, { status: { ...STATUS, state: "FAILED" } }))).toEqual(["LEAD_JOB_FAILED"]);
     expect(codes(decide({}, { status: { ...STATUS, state: "COMPLETED", artifactSha256: OTHER } }))).toEqual(["LEAD_DIGEST_CONFLICT"]);
     expect(codes(decide({ recordedStatuses: [{ ...STATUS, externalJobId: "wk-0000" }] }))).toEqual(["LEAD_STATUS_CONFLICT"]);
+  });
+});
+
+describe("reading the services' answers to a lead lookup", () => {
+  it("parses them with the evidence parsers and treats malformed answers as a failed lookup", () => {
+    const status = JSON.stringify({ ...STATUS, history: [] });
+    expect(readArtifactLead(DIGEST, status, JSON.stringify([ARTIFACT]))).toEqual({ digest: DIGEST, status: STATUS, artifact: ARTIFACT });
+    expect(readArtifactLead(DIGEST, null, "[]")).toEqual({ digest: DIGEST, status: undefined, artifact: undefined });
+    expect(readArtifactLead(DIGEST, status, JSON.stringify([{ ...ARTIFACT, sha256: OTHER, currentSha256: OTHER }]))?.artifact).toBeUndefined();
+    expect(readArtifactLead(DIGEST, "{not json", "[]")).toBeUndefined();
+    expect(readArtifactLead(DIGEST, status, '{"sha256": "x"}')).toBeUndefined();
   });
 });

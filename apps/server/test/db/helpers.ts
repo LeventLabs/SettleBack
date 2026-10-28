@@ -5,11 +5,10 @@ import type { DatabaseSync } from "node:sqlite";
 import { loadPolicyText } from "@settleback/fixtures";
 import { openDatabase } from "../../src/db/database.ts";
 import { createOperation, registerPolicy } from "../../src/db/operations.ts";
+import { BUYER, NOW, SELLER, TOKEN } from "../../eval/fixture-case.ts";
 
-export const NOW = "2026-10-30T10:00:00.000Z";
-export const BUYER = "0x00000000000000000000000000000000000000b1";
-export const SELLER = "0x00000000000000000000000000000000000000a1";
-export const TOKEN = "0x8fe3cb719ee4410e236cd6b72ab1fcdc06ef53c6";
+export { BUYER, NOW, SELLER, TOKEN, insertAttempt } from "../../eval/fixture-case.ts";
+
 export const TX_A = `0x${"a".repeat(64)}`;
 export const TX_B = `0x${"b".repeat(64)}`;
 
@@ -59,27 +58,6 @@ export function seedOperation(db: DatabaseSync, key = "op-key-0001", overrides: 
   }).operation.id;
 }
 
-export function insertAttempt(
-  db: DatabaseSync,
-  values: { id: string; operationId: string; purpose?: string; state?: string },
-): void {
-  db.prepare(
-    `INSERT INTO payment_attempts (id, operation_id, purpose, state, payer, payee, chain_id, token, amount_base_units,
-       intent_sha256, deployment_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 133, ?, '1000000', ?, 'local-registry', ?, ?)`,
-  ).run(
-    values.id,
-    values.operationId,
-    values.purpose ?? "ORIGINAL",
-    values.state ?? "CREATED",
-    BUYER,
-    SELLER,
-    TOKEN,
-    "c".repeat(64),
-    NOW,
-    NOW,
-  );
-}
 
 export function insertCase(db: DatabaseSync, id: string, operationId: string): void {
   db.prepare(

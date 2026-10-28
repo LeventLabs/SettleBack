@@ -1,4 +1,4 @@
-import type { ArtifactStoreRecord, BaselineCode, BaselineResult, ServiceStatusRecord } from "./baseline.ts";
+import { parseArtifactRecords, parseServiceStatus, type ArtifactStoreRecord, type BaselineCode, type BaselineResult, type ServiceStatusRecord } from "./baseline.ts";
 import type { EvidenceProvenance, EvidenceSource } from "./evidence.ts";
 import { checkSpan, findSpan, type SpanRef } from "./spans.ts";
 
@@ -296,6 +296,18 @@ export interface ArtifactLead {
   digest: string;
   status: ServiceStatusRecord | undefined;
   artifact: ArtifactStoreRecord | undefined;
+}
+
+/**
+ * Reads the services' answers to a lead lookup with the same parsers used for case evidence.
+ * Returns undefined when either answer is malformed, which is a failed lookup, not "no record".
+ */
+export function readArtifactLead(digest: string, jobStatus: string | null, artifactRecords: string): ArtifactLead | undefined {
+  const status = jobStatus === null ? undefined : parseServiceStatus(jobStatus);
+  if (jobStatus !== null && status === undefined) return undefined;
+  const records = parseArtifactRecords(artifactRecords);
+  if (records === undefined) return undefined;
+  return { digest, status, artifact: records.find((record) => record.sha256 === digest) };
 }
 
 export type DecisionCode =

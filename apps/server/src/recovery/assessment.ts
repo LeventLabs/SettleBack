@@ -6,8 +6,8 @@ import {
   assertTransition,
   buildAssessmentPrompt,
   decideAssessment,
-  parseArtifactRecords,
   parseServiceStatus,
+  readArtifactLead,
   validateAssessment,
   type ArtifactLead,
   type AssessmentDecision,
@@ -26,7 +26,7 @@ import { readCaseEvidence, type CaseRecord } from "../db/cases.ts";
 import { immediateTransaction } from "../db/database.ts";
 import { AssessmentForbiddenError, AssessmentInProgressError, CaseNotAssessableError } from "../db/errors.ts";
 import { appendEvent } from "../db/events.ts";
-import { readCaseBaseline } from "./baseline.ts";
+import { readCaseBaseline, type CaseBaselineSnapshot } from "./baseline.ts";
 import { ProviderError, type AssessmentProvider, type ProviderFailure, type ProviderReply } from "./provider.ts";
 
 /**
@@ -115,14 +115,7 @@ export async function assessCase(db: DatabaseSync, input: AssessCaseInput): Prom
       throw new AssessmentInProgressError(record.id);
     }
 
-    const assessmentSnapshot: AssessmentSnapshot = {
-      caseId: record.id,
-      operationId: record.operationId,
-      evidenceRevision: record.evidence.revision,
-      evidenceSha256: record.evidence.sha256,
-      evidence: snapshot.items.map((item) => ({ id: item.id, source: item.source, provenance: item.provenance, content: item.content })),
-      baseline: snapshot.result,
-    };
+    const assessmentSnapshot = toAssessmentSnapshot(snapshot);
     const prompt = buildAssessmentPrompt(assessmentSnapshot);
     const request: AssessmentRequestRecord = {
       id: newId(),
@@ -152,12 +145,7 @@ export async function assessCase(db: DatabaseSync, input: AssessCaseInput): Prom
     if (record.status === "OPEN") {
       moveCase(db, record, "ASSESSING", input.requestedBy.role, requestedBy, "CASE_ASSESSING", request.requestedAt, request.promptSha256);
     }
-    const recordedStatuses = snapshot.items
-      .filter((item) => item.source === "service-status" && item.provenance === "AUTHENTICATED_SERVICE")
-      .flatMap((item) => {
-        const parsed = parseServiceStatus(item.content);
-        return parsed === undefined ? [] : [parsed];
-      });
+    const recordedStatuses = recordedServiceStatuses(assessmentSnapshot);
     return { kind: "started" as const, request, snapshot: assessmentSnapshot, prompt, recordedStatuses } satisfies Started;
   });
 
@@ -198,19 +186,53 @@ async function run(started: Started, input: AssessCaseInput, lookupTimeoutMs: nu
     throw error;
   }
 
-  if (reply.model !== provider.model) return failed(reply, "MODEL_MISMATCH", `requested ${provider.model}, but ${reply.model} answered`);
-  if (reply.stopReason === "refusal") return failed(reply, "REFUSED", `the model declined (${reply.refusalCategory ?? "no category"})`);
-  if (reply.stopReason === "max_tokens") return failed(reply, "TRUNCATED", "the response hit the output token limit before it was complete");
-  if (reply.stopReason !== "end_turn") return failed(reply, "UNEXPECTED_STOP", `the response stopped with ${reply.stopReason}`);
-  if (reply.text === null) return failed(reply, "MALFORMED_OUTPUT", "the response carried no text");
-
-  const validation = validateAssessment(reply.text, started.snapshot);
-  if (!validation.ok) return failed(reply, validation.code, validation.detail);
-  const { assessment } = validation;
+  const interpreted = interpretReply(reply, provider.model, started.snapshot);
+  if (!interpreted.ok) return failed(reply, interpreted.code, interpreted.detail);
+  const { assessment } = interpreted;
 
   const digest = assessment.artifactSha256;
   if (assessment.suggestedAction !== "RETRIEVE" || digest === null) return { reply, failure: undefined, assessment, lead: undefined };
   return { reply, failure: undefined, assessment, lead: await lookUpLead(input.lookup, started.snapshot.operationId, digest, lookupTimeoutMs) };
+}
+
+/** The assessment's view of a case read with readCaseBaseline. */
+export function toAssessmentSnapshot(snapshot: CaseBaselineSnapshot): AssessmentSnapshot {
+  return {
+    caseId: snapshot.case.id,
+    operationId: snapshot.case.operationId,
+    evidenceRevision: snapshot.case.evidence.revision,
+    evidenceSha256: snapshot.case.evidence.sha256,
+    evidence: snapshot.items.map((item) => ({ id: item.id, source: item.source, provenance: item.provenance, content: item.content })),
+    baseline: snapshot.result,
+  };
+}
+
+/** Service statuses already recorded as authenticated case evidence. */
+export function recordedServiceStatuses(snapshot: AssessmentSnapshot): ServiceStatusRecord[] {
+  return snapshot.evidence
+    .filter((item) => item.source === "service-status" && item.provenance === "AUTHENTICATED_SERVICE")
+    .flatMap((item) => {
+      const parsed = parseServiceStatus(item.content);
+      return parsed === undefined ? [] : [parsed];
+    });
+}
+
+/**
+ * Accepts a reply only when the pinned model answered, finished normally, and returned text that
+ * validates against the snapshot.
+ */
+export function interpretReply(
+  reply: ProviderReply,
+  model: string,
+  snapshot: AssessmentSnapshot,
+): { ok: true; assessment: ValidatedAssessment } | { ok: false; code: AssessmentFailure; detail: string } {
+  if (reply.model !== model) return { ok: false, code: "MODEL_MISMATCH", detail: `requested ${model}, but ${reply.model} answered` };
+  if (reply.stopReason === "refusal") return { ok: false, code: "REFUSED", detail: `the model declined (${reply.refusalCategory ?? "no category"})` };
+  if (reply.stopReason === "max_tokens") return { ok: false, code: "TRUNCATED", detail: "the response hit the output token limit before it was complete" };
+  if (reply.stopReason !== "end_turn") return { ok: false, code: "UNEXPECTED_STOP", detail: `the response stopped with ${reply.stopReason}` };
+  if (reply.text === null) return { ok: false, code: "MALFORMED_OUTPUT", detail: "the response carried no text" };
+  const validation = validateAssessment(reply.text, snapshot);
+  return validation.ok ? { ok: true, assessment: validation.assessment } : { ok: false, code: validation.code, detail: validation.detail };
 }
 
 /** Asks the services about the digest. A malformed or failed answer is a failed lookup, not "no record". */
@@ -224,10 +246,8 @@ async function lookUpLead(lookup: ServiceLookup, operationId: string, digest: st
     return { decision: undefined, failed: true, raw: { digest, error: error instanceof Error ? error.message : String(error) } };
   }
   const raw = { digest, jobStatus: statusText, artifactRecords: artifactText };
-  const status = statusText === null ? undefined : parseServiceStatus(statusText);
-  const records = parseArtifactRecords(artifactText);
-  if ((statusText !== null && status === undefined) || records === undefined) return { decision: undefined, failed: true, raw };
-  return { decision: { digest, status, artifact: records.find((record) => record.sha256 === digest) }, failed: false, raw };
+  const decision = readArtifactLead(digest, statusText, artifactText);
+  return { decision, failed: decision === undefined, raw };
 }
 
 function failed(reply: ProviderReply | undefined, code: AssessmentFailure, detail: string): Outcome {

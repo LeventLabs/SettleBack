@@ -7,6 +7,14 @@
 
 The registry goes to mainnet only after a security review. Neither contract holds funds.
 
+## Deployments
+
+| Contract | Network | Address | Verifier | Transaction |
+|---|---|---|---|---|
+| `RecoveryRegistry` | HSK Chain testnet (133) | [`0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C`](https://repo.sourcify.dev/133/0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C) | `0x7F13f5Ecf7ef6dAA52a49a459D9295F018673919` | `0x3ab879880f2aa20ae846fa81353cb434ff056579700e41848726907b995aa9e6` (block 35000152) |
+
+Deployed from commit `e9b9afc` on 28 October 2026; source verified on Sourcify (creation and runtime `match`; the build omits the metadata hash, so an exact metadata match is not possible). The on-chain runtime code was also compared byte for byte with a local deployment of the same source and verifier. The marker on 177 is not deployed yet.
+
 ## Tests
 
 ```bash

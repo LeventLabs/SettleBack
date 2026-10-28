@@ -41,7 +41,7 @@ The MVP targets:
 - An unresolved case that safely stops further spending.
 - Cited evidence analysis and an inspectable recovery record.
 
-Live HSP access and integration remain unverified for SettleBack. No deployed contract, completed payment flow, or production readiness is claimed.
+The `RecoveryRegistry` is deployed on HSK Chain testnet (133) at [`0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C`](https://repo.sourcify.dev/133/0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C), source-verified on Sourcify; the application does not use it yet. Live HSP access and integration remain unverified for SettleBack. No completed live payment flow, mainnet deployment, or production readiness is claimed.
 
 ## Development
 

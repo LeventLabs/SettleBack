@@ -162,6 +162,20 @@ describe("verifier writes", () => {
     expect(await client.getTransactionCount({ address: addressOf(verifierKey()) })).toBe(before);
   });
 
+  it("sends concurrent writes one after another from the one verifier account", async () => {
+    const inputs: RegisterCaseInput[] = [];
+    for (let i = 0; i < 3; i += 1) inputs.push(await caseInput({ actionKind: "RETRIEVE", autoEligible: false }));
+    const writes = await Promise.all(inputs.map((input) => gateway.registerCase(input)));
+    expect(new Set(writes.map((write) => write.txHash)).size).toBe(3);
+    for (const input of inputs) expect((await gateway.readCase(input.caseKey))?.state).toBe("OPEN");
+    // A duplicate sent at the same time simulates after the first landed and is refused without a transaction.
+    const [input] = inputs;
+    if (input === undefined) throw new Error("expected a case");
+    const results = await Promise.allSettled([gateway.reserveRetrieval(input.caseKey), gateway.reserveRetrieval(input.caseKey)]);
+    expect(results.map((result) => result.status)).toEqual(["fulfilled", "rejected"]);
+    expect(results[1]).toMatchObject({ reason: { reason: "WrongState" } });
+  });
+
   it("reserves and completes a retrieval", async () => {
     const input = await caseInput({ actionKind: "RETRIEVE", autoEligible: false });
     await gateway.registerCase(input);

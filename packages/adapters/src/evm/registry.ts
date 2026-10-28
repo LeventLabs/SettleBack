@@ -70,6 +70,8 @@ export class RegistryConfigurationError extends Error {
   }
 }
 
+type WriteFunction = "registerCase" | "reserveRetrieval" | "completeRepayment" | "completeRetrieval";
+
 /**
  * The RecoveryRegistry on an EVM chain. The same class serves a disposable local chain and HSK
  * Chain; the provenance label says which. Construction goes through `connect`, which checks the
@@ -85,6 +87,8 @@ export class EvmRegistryGateway implements RegistryGateway {
   private readonly account: PrivateKeyAccount | undefined;
   private readonly confirmations: number;
   private readonly timeoutMs: number;
+  // Writes from the one verifier account go out one at a time, so concurrent calls cannot pick the same nonce.
+  private writes: Promise<unknown> = Promise.resolve();
 
   private constructor(options: EvmRegistryOptions, chain: Chain) {
     this.provenance = options.provenance;
@@ -350,12 +354,16 @@ export class EvmRegistryGateway implements RegistryGateway {
   /**
    * Simulates first, so a contract refusal is reported by its custom error name without spending
    * gas, then sends and waits for the configured confirmations. A sent transaction whose receipt
-   * does not arrive in time is reported with its hash as an unknown outcome.
+   * does not arrive in time is reported with its hash as an unknown outcome. Each write starts
+   * after the previous one has finished, so it also simulates against the state that one left.
    */
-  private async write<F extends "registerCase" | "reserveRetrieval" | "completeRepayment" | "completeRetrieval">(
-    functionName: F,
-    args: readonly unknown[],
-  ): Promise<RegistryWrite> {
+  private write<F extends WriteFunction>(functionName: F, args: readonly unknown[]): Promise<RegistryWrite> {
+    const next = this.writes.then(() => this.send(functionName, args));
+    this.writes = next.catch(() => undefined);
+    return next;
+  }
+
+  private async send<F extends WriteFunction>(functionName: F, args: readonly unknown[]): Promise<RegistryWrite> {
     if (this.wallet === undefined || this.account === undefined) throw new RegistryConfigurationError("no verifier key is configured for registry writes");
     let request;
     try {

@@ -106,6 +106,27 @@ export function repaymentTransfer(operation: OperationParties): TransferTerms {
   return { payer: operation.seller, payee: operation.buyer, chainId: operation.chainId, token: operation.token, amountBaseUnits: operation.amountBaseUnits };
 }
 
+export const DELIVERY_ACK_SCHEMA = "settleback.delivery-ack.v1";
+
+/**
+ * The buyer's statement that it received the artifact the proposal names. Its digest is the
+ * acknowledgement commitment the registry records with the retrieval outcome. It is an
+ * application-authenticated statement of receipt, not proof that the buyer is satisfied.
+ */
+export interface DeliveryAcknowledgement {
+  schema: typeof DELIVERY_ACK_SCHEMA;
+  caseKey: string;
+  actionSha256: string;
+  operationId: string;
+  buyer: Address;
+  artifactSha256: string;
+  acknowledgedAt: string;
+}
+
+export function deliveryAckSha256(ack: DeliveryAcknowledgement): string {
+  return sha256Hex(canonicalJson(ack as unknown as Parameters<typeof canonicalJson>[0]));
+}
+
 export interface StandingPolicyView {
   status: "ACTIVE" | "PAUSED" | "REVOKED" | "REPLACED";
   seller: Address;

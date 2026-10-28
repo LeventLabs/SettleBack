@@ -6,7 +6,7 @@ import { loadCases, loadPolicyTerms, loadPolicyText, loadSourceBytes, loadSource
 import { loadCaseEvidence, openCase } from "../src/db/cases.ts";
 import { ingestEvidence, type EvidenceRecord } from "../src/db/evidence.ts";
 import { createOperation, registerPolicy } from "../src/db/operations.ts";
-import type { ServiceLookup } from "../src/recovery/assessment.ts";
+import type { ResultLookup } from "../src/recovery/retrieval.ts";
 
 /**
  * Sets up fixture cases for tests and the assessment evaluation: the demo service produces the
@@ -26,7 +26,7 @@ export interface FixtureCaseSetup {
   caseId: string;
   operationId: string;
   composed: ComposedCase;
-  lookup: ServiceLookup;
+  lookup: ResultLookup;
   items(): EvidenceRecord[];
   item(source: EvidenceRecord["source"]): EvidenceRecord;
 }
@@ -68,7 +68,7 @@ export async function setupFixtureCase(db: DatabaseSync, fixtureId: string): Pro
   for (const submission of composed.evidence) ingestEvidence(db, { ...submission, operationId: operation.id, now: NOW });
   const caseId = openCase(db, { operationId: operation.id, openedBy: { role: "buyer", identity: BUYER }, now: NOW }).case.id;
   const run = composed.serviceRun;
-  const lookup: ServiceLookup = {
+  const lookup: ResultLookup = {
     jobStatus: async (operationId) => {
       const status = run?.service.status(operationId);
       return status === undefined ? null : JSON.stringify(status);
@@ -76,6 +76,10 @@ export async function setupFixtureCase(db: DatabaseSync, fixtureId: string): Pro
     artifactRecords: async (sha256) => {
       const record = run?.store.record(sha256);
       return JSON.stringify(record === undefined ? [] : [record]);
+    },
+    artifactBytes: async (sha256) => {
+      const content = run?.store.get(sha256);
+      return content === undefined ? null : Buffer.from(content, "utf8");
     },
   };
   const items = (): EvidenceRecord[] => loadCaseEvidence(db, caseId).items;

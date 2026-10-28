@@ -74,6 +74,29 @@ export function getRecoveryActionForCase(db: DatabaseSync, caseId: string): Reco
   return actionRow(db, "a.case_id", caseId);
 }
 
+export interface DeliveryAckRecord {
+  operationId: string;
+  buyer: string;
+  artifactSha256: string;
+  acknowledgedAt: string;
+}
+
+/** An operation has at most one acknowledgement; the table refuses a second one and any change. Callers hold the transaction. */
+export function insertDeliveryAck(db: DatabaseSync, ack: DeliveryAckRecord): void {
+  db.prepare("INSERT INTO delivery_acks (operation_id, buyer, artifact_sha256, acknowledged_at) VALUES (?, ?, ?, ?)").run(
+    ack.operationId,
+    ack.buyer,
+    ack.artifactSha256,
+    ack.acknowledgedAt,
+  );
+}
+
+export function getDeliveryAck(db: DatabaseSync, operationId: string): DeliveryAckRecord | undefined {
+  const row = db.prepare("SELECT * FROM delivery_acks WHERE operation_id = ?").get(operationId);
+  if (row === undefined) return undefined;
+  return { operationId: String(row.operation_id), buyer: String(row.buyer), artifactSha256: String(row.artifact_sha256), acknowledgedAt: String(row.acknowledged_at) };
+}
+
 export interface ActionMove {
   to: RecoveryActionState;
   actor: Actor;

@@ -71,6 +71,11 @@ export function getCase(db: DatabaseSync, id: string): CaseRecord | undefined {
   return readTransaction(db, () => caseRow(db, "id", id));
 }
 
+/** The operation's case, for callers that already hold a transaction. */
+export function readCaseForOperation(db: DatabaseSync, operationId: string): CaseRecord | undefined {
+  return caseRow(db, "operation_id", operationId);
+}
+
 /**
  * The case with its evidence, after checking every stored item against its digests and the
  * snapshot recorded on the case.

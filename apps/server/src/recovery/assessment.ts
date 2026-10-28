@@ -208,7 +208,7 @@ export function toAssessmentSnapshot(snapshot: CaseBaselineSnapshot): Assessment
 }
 
 /** Service statuses already recorded as authenticated case evidence. */
-export function recordedServiceStatuses(snapshot: AssessmentSnapshot): ServiceStatusRecord[] {
+export function recordedServiceStatuses(snapshot: { evidence: readonly { source: string; provenance: string; content: string }[] }): ServiceStatusRecord[] {
   return snapshot.evidence
     .filter((item) => item.source === "service-status" && item.provenance === "AUTHENTICATED_SERVICE")
     .flatMap((item) => {

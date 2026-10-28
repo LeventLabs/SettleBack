@@ -213,6 +213,7 @@ export async function ensureRegistered(db: DatabaseSync, input: { actionId: stri
   const { registry } = input;
   const action = readTransaction(db, () => getRecoveryAction(db, input.actionId));
   if (action === undefined) throw new RecoveryRefusedError("ACTION_NOT_FOUND", `Recovery action ${input.actionId} does not exist.`);
+  requireRegistry(registry, action.proposal);
   if (action.state !== "PREPARED") return action;
   const expected = registrationTerms(action.proposal);
 
@@ -283,10 +284,10 @@ export async function confirmRepaymentReservation(
   db: DatabaseSync,
   input: { actionId: string; txHash: string; registry: RegistryGateway | undefined; now: () => Date },
 ): Promise<ReservationOutcome> {
-  const registry = input.registry;
-  if (registry === undefined) throw new RecoveryRefusedError("REGISTRY_REQUIRED", "No recovery registry is configured; integrated recovery is unavailable.");
+  if (input.registry === undefined) throw new RecoveryRefusedError("REGISTRY_REQUIRED", "No recovery registry is configured; integrated recovery is unavailable.");
   const action = readTransaction(db, () => getRecoveryAction(db, input.actionId));
   if (action === undefined) throw new RecoveryRefusedError("ACTION_NOT_FOUND", `Recovery action ${input.actionId} does not exist.`);
+  const registry = requireRegistry(input.registry, action.proposal);
   if (action.action !== "REPAY") throw new RecoveryRefusedError("WRONG_ACTION_STATE", "Only a repayment is reserved by the seller or a delegate.");
   const recorded = action.approvalTx ?? action.policyTx;
   if (action.state !== "PREPARED") {
@@ -402,8 +403,23 @@ export function registrationTerms(proposal: RecoveryProposal): RegisterCaseInput
   };
 }
 
+/**
+ * The registry an action must use: the one its proposal was registered on. Another deployment,
+ * even with the same verifier, would hold a different case under a different key.
+ */
+export function requireRegistry(registry: RegistryGateway | undefined, proposal: RecoveryProposal): RegistryGateway {
+  if (registry === undefined) throw new RecoveryRefusedError("REGISTRY_REQUIRED", "No recovery registry is configured; integrated recovery is unavailable.");
+  if (registry.chainId !== proposal.registry.chainId || registry.address.toLowerCase() !== proposal.registry.address.toLowerCase()) {
+    throw new RecoveryRefusedError(
+      "WRONG_REGISTRY",
+      `The recovery was prepared on registry ${proposal.registry.address} (chain ${proposal.registry.chainId}), not the configured ${registry.address} (chain ${registry.chainId}).`,
+    );
+  }
+  return registry;
+}
+
 /** The first field where the registry's record differs from the proposal's terms, if any. */
-function termsMismatch(onChain: RegistryCase, expected: RegisterCaseInput): string | undefined {
+export function termsMismatch(onChain: RegistryCase, expected: RegisterCaseInput): string | undefined {
   const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
   if (!same(onChain.buyer, expected.buyer)) return "buyer";
   if (!same(onChain.seller, expected.seller)) return "seller";
@@ -428,7 +444,7 @@ function completedArtifact(statusContents: readonly string[]): string | null {
   return null;
 }
 
-function moveCase(
+export function moveCase(
   db: DatabaseSync,
   record: CaseRecord,
   to: CaseState,

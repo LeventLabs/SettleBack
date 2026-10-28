@@ -129,7 +129,13 @@ export type RecoveryRefusal =
   | "REVISION_CONFLICT"
   | "REGISTRY_TERMS_MISMATCH"
   | "ACTION_NOT_FOUND"
-  | "WRONG_ACTION_STATE";
+  | "WRONG_ACTION_STATE"
+  | "WRONG_REGISTRY"
+  | "NOT_EXECUTABLE"
+  | "DEPENDENCY_UNAVAILABLE"
+  | "ARTIFACT_MISMATCH"
+  | "ACK_DIGEST_MISMATCH"
+  | "REGISTRY_OUTCOME_MISMATCH";
 
 /** A recovery step refused before anything was changed, on chain or in the database. */
 export class RecoveryRefusedError extends StoreError {

@@ -12,14 +12,13 @@ import { BUYER, NOW, SELLER, TOKEN, memoryDatabase } from "../db/helpers.ts";
 import { startLocalChain, type LocalChain } from "../registry/anvil.ts";
 import { ScriptedProvider, TERMS, lineWith, registerFixturePolicies, reply, setupFixtureCase } from "./helpers.ts";
 
-const PORT = 24_000 + (process.pid % 5_000);
 const clock = () => new Date();
 let chain: LocalChain;
 let policyChain: LocalChain;
 let db: DatabaseSync;
 
 beforeAll(async () => {
-  [chain, policyChain] = await Promise.all([startLocalChain(PORT), startLocalChain(PORT + 1)]);
+  [chain, policyChain] = await Promise.all([startLocalChain(), startLocalChain()]);
 }, 120_000);
 
 afterAll(() => {

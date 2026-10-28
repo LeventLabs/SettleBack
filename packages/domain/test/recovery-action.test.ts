@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   BASELINE_RULES_VERSION,
+  DELIVERY_ACK_SCHEMA,
+  deliveryAckSha256,
   deriveEligibility,
   eligibilityRulesSha256,
   proposalSha256,
@@ -8,6 +10,7 @@ import {
   repaymentTransfer,
   standingPolicyGaps,
   type BaselineResult,
+  type DeliveryAcknowledgement,
   type PolicyFitInput,
   type RecoveryProposal,
 } from "../src/index.ts";
@@ -133,5 +136,33 @@ describe("standing policy coverage", () => {
     expect(fit({ now: new Date("2026-11-01T00:00:00.000Z") })).toEqual(["the policy is outside its validity window"]);
     expect(fit({ amountBaseUnits: "1000001", bookedTodayBaseUnits: "0" })).toEqual(["the amount exceeds the per-case limit"]);
     expect(fit({ outstandingBaseUnits: "1000001" })).toEqual(["the amount would exceed today's limit with what is booked and outstanding"]);
+  });
+});
+
+describe("delivery acknowledgement", () => {
+  const ack: DeliveryAcknowledgement = {
+    schema: DELIVERY_ACK_SCHEMA,
+    caseKey: `0x${"1".repeat(64)}`,
+    actionSha256: "2".repeat(64),
+    operationId: "op-1",
+    buyer: BUYER,
+    artifactSha256: "3".repeat(64),
+    acknowledgedAt: "2026-10-30T10:00:00.000Z",
+  };
+
+  it("commits to every field of the statement, whatever the key order", () => {
+    const digest = deliveryAckSha256(ack);
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    const reordered = Object.fromEntries(Object.entries(ack).reverse()) as unknown as DeliveryAcknowledgement;
+    expect(deliveryAckSha256(reordered)).toBe(digest);
+    const variants: Partial<DeliveryAcknowledgement>[] = [
+      { caseKey: `0x${"4".repeat(64)}` },
+      { actionSha256: "4".repeat(64) },
+      { operationId: "op-2" },
+      { buyer: SELLER },
+      { artifactSha256: "4".repeat(64) },
+      { acknowledgedAt: "2026-10-30T10:00:01.000Z" },
+    ];
+    for (const variant of variants) expect(deliveryAckSha256({ ...ack, ...variant }), JSON.stringify(variant)).not.toBe(digest);
   });
 });

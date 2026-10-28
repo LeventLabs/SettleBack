@@ -72,4 +72,42 @@ describe("loadConfig", () => {
       expect(String(error)).not.toContain(key);
     }
   });
+
+  it("configures the registry all at once or not at all, on the chain the environment allows", () => {
+    const local = { SETTLEBACK_REGISTRY_RPC_URL: "http://127.0.0.1:8545", SETTLEBACK_REGISTRY_CHAIN_ID: "31337", SETTLEBACK_REGISTRY_ADDRESS: "0x5FbDB2315678afecb367f032d93F642f64180aa3" };
+    expect(loadConfig({}).registry).toBeUndefined();
+    expect(loadConfig(local).registry).toMatchObject({ chainId: 31337, confirmations: 1, verifierPrivateKey: undefined });
+    expect(() => loadConfig({ SETTLEBACK_REGISTRY_RPC_URL: local.SETTLEBACK_REGISTRY_RPC_URL })).toThrow(/set together/);
+    expect(() => loadConfig({ ...local, SETTLEBACK_REGISTRY_CHAIN_ID: "133" })).toThrow(/never HSK Chain/);
+    expect(() => loadConfig({ ...local, SETTLEBACK_REGISTRY_ADDRESS: "0x123" })).toThrow(/20-byte/);
+    const testnet = {
+      SETTLEBACK_ENV: "testnet",
+      SETTLEBACK_REGISTRY_RPC_URL: "https://testnet.hsk.xyz",
+      SETTLEBACK_REGISTRY_CHAIN_ID: "133",
+      SETTLEBACK_REGISTRY_ADDRESS: "0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C",
+    };
+    expect(loadConfig(testnet).registry).toMatchObject({ chainId: 133, confirmations: 3 });
+    expect(() => loadConfig({ ...testnet, SETTLEBACK_REGISTRY_CHAIN_ID: "177" })).toThrow(/chain 133, not 177/);
+    expect(() => loadConfig({ ...testnet, SETTLEBACK_REGISTRY_RPC_URL: "http://testnet.hsk.xyz" })).toThrow(/HTTPS/);
+    expect(() => loadConfig({ SETTLEBACK_VERIFIER_PRIVATE_KEY: `0x${"1".repeat(64)}` })).toThrow(/no registry is configured/);
+  });
+
+  it("keeps the verifier key out of JSON and error messages", () => {
+    const key = `0x${"ab".repeat(32)}`;
+    const config = loadConfig({
+      SETTLEBACK_REGISTRY_RPC_URL: "http://127.0.0.1:8545",
+      SETTLEBACK_REGISTRY_CHAIN_ID: "31337",
+      SETTLEBACK_REGISTRY_ADDRESS: "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+      SETTLEBACK_VERIFIER_PRIVATE_KEY: key,
+    });
+    expect(config.registry?.verifierPrivateKey?.reveal()).toBe(key);
+    expect(JSON.stringify(config)).not.toContain(key.slice(2));
+    try {
+      loadConfig({ SETTLEBACK_REGISTRY_RPC_URL: "http://127.0.0.1:8545", SETTLEBACK_REGISTRY_CHAIN_ID: "31337", SETTLEBACK_REGISTRY_ADDRESS: "0x5FbDB2315678afecb367f032d93F642f64180aa3", SETTLEBACK_VERIFIER_PRIVATE_KEY: key.slice(2) });
+      throw new Error("expected a refusal");
+    } catch (error) {
+      expect(String(error)).toMatch(/SETTLEBACK_VERIFIER_PRIVATE_KEY/);
+      expect(String(error)).not.toContain(key.slice(2));
+    }
+  });
 });

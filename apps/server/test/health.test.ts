@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { RegistryGateway } from "@settleback/adapters";
 import { buildApp } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 
@@ -17,6 +18,7 @@ describe("GET /api/health", () => {
         paymentChainId: 133,
         registryChainId: 177,
         paymentWrites: "disabled",
+        registry: { status: "not configured", integratedRepayment: "unavailable" },
       });
     } finally {
       await app.close();
@@ -28,6 +30,19 @@ describe("GET /api/health", () => {
     try {
       const body = (await app.inject({ method: "GET", url: "/api/health" })).json();
       expect(body).toMatchObject({ environment: "local", mode: "simulated", networkProfile: "mainnet", networkLabel: "local simulation (mainnet)" });
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("registry status", () => {
+  it("shows the connected registry's chain, address, and provenance", async () => {
+    const registry = { chainId: 31337, address: "0x5fbdb2315678afecb367f032d93f642f64180aa3", provenance: "SIMULATED" } as unknown as RegistryGateway;
+    const app = buildApp(loadConfig({ SETTLEBACK_LOG_LEVEL: "silent" }), { registry });
+    try {
+      const body = (await app.inject({ method: "GET", url: "/api/health" })).json();
+      expect(body.registry).toEqual({ status: "connected", chainId: 31337, address: "0x5fbdb2315678afecb367f032d93f642f64180aa3", provenance: "SIMULATED" });
     } finally {
       await app.close();
     }

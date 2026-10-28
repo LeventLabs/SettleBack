@@ -137,7 +137,6 @@ async function runGatewayPayment(
 ): Promise<{ record: GatewayPaymentRecord; verdict: SettlementVerdict; observedAt: string }> {
   const sim = createSimulatedAdapters({
     environment: "local",
-    verifier: "0x00000000000000000000000000000000000000f0",
     webhookSecret: "sim-webhook-secret",
   });
   const id = createHash("sha256").update(terms.operationId).digest("hex").slice(0, 16);

@@ -11,6 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@settleback/domain": "0.0.0"
+    "@settleback/domain": "0.0.0",
+    "viem": "2.57.7"
   }
 }

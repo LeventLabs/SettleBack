@@ -1,5 +1,7 @@
 export * from "./amounts.ts";
 export * from "./clock.ts";
+export * from "./evm/registry.ts";
+export { RECOVERY_REGISTRY_ABI } from "./evm/registry-abi.ts";
 export * from "./factory.ts";
 export * from "./gateway.ts";
 export * from "./hsp/cart-mandate.ts";
@@ -16,4 +18,3 @@ export * from "./webhook.ts";
 export { SimChain } from "./sim/chain.ts";
 export { SimGateway, WEBHOOK_RETRY_DELAYS_MS, type GatewayFault, type SimMerchantApp, type WebhookAttempt, type WebhookReceiver } from "./sim/gateway.ts";
 export { SimulatedPaymentRail, signSimulatedPayload } from "./sim/payment-rail.ts";
-export { SimulatedRegistry, type RegistryFault } from "./sim/registry.ts";

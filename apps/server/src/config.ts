@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { parseEnvironment, parseNetworkProfile, type Environment, type NetworkProfile } from "@settleback/domain";
+import { describeNetwork, parseEnvironment, parseNetworkProfile, type Environment, type NetworkProfile } from "@settleback/domain";
 
 const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
 /** Models the assessment may be pinned to. Changing the list is a reviewed code change. */
@@ -53,6 +53,18 @@ export interface ServerConfig {
   /** Which live profile the local simulation imitates; meaningless and refused elsewhere. */
   simulatedProfile: NetworkProfile;
   assessment: AssessmentConfig;
+  /** Undefined when no registry is configured; integrated repayment is then unavailable. */
+  registry: RegistryConfig | undefined;
+}
+
+export interface RegistryConfig {
+  rpcUrl: string;
+  chainId: number;
+  address: `0x${string}`;
+  /** Blocks before a registry write or a reported reservation counts as confirmed. */
+  confirmations: number;
+  /** The verifier's key for registry writes; absent means read and confirm only. */
+  verifierPrivateKey: Secret | undefined;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
@@ -87,6 +99,59 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       timeoutMs: parseBoundedInteger("SETTLEBACK_ASSESSMENT_TIMEOUT_MS", env.SETTLEBACK_ASSESSMENT_TIMEOUT_MS ?? "45000", 5000, 120000),
       apiKey: parseApiKey(env.ANTHROPIC_API_KEY),
     },
+    registry: parseRegistry(env, environment, env.SETTLEBACK_SIM_PROFILE === undefined ? "testnet" : parseNetworkProfile(env.SETTLEBACK_SIM_PROFILE)),
+  };
+}
+
+const HSK_CHAINS = [133, 177];
+
+/**
+ * All of RPC URL, chain ID, and address, or none. A local environment may only use a disposable
+ * chain, never HSK Chain; a live environment may only use its profile's registry chain, over HTTPS.
+ */
+function parseRegistry(env: NodeJS.ProcessEnv, environment: Environment, simulatedProfile: NetworkProfile): RegistryConfig | undefined {
+  const rpcUrl = env.SETTLEBACK_REGISTRY_RPC_URL;
+  const chain = env.SETTLEBACK_REGISTRY_CHAIN_ID;
+  const address = env.SETTLEBACK_REGISTRY_ADDRESS;
+  const given = [rpcUrl, chain, address].filter((value) => value !== undefined && value !== "");
+  if (given.length === 0) {
+    if (env.SETTLEBACK_VERIFIER_PRIVATE_KEY) throw new Error("SETTLEBACK_VERIFIER_PRIVATE_KEY is set but no registry is configured.");
+    return undefined;
+  }
+  if (given.length !== 3 || rpcUrl === undefined || chain === undefined || address === undefined) {
+    throw new Error("SETTLEBACK_REGISTRY_RPC_URL, SETTLEBACK_REGISTRY_CHAIN_ID, and SETTLEBACK_REGISTRY_ADDRESS must be set together.");
+  }
+  const chainId = parseBoundedInteger("SETTLEBACK_REGISTRY_CHAIN_ID", chain, 1, 2 ** 32);
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new Error(`SETTLEBACK_REGISTRY_ADDRESS must be a 20-byte hex address, got "${address}".`);
+  let url: URL;
+  try {
+    url = new URL(rpcUrl);
+  } catch {
+    throw new Error(`SETTLEBACK_REGISTRY_RPC_URL is not a URL, got "${rpcUrl}".`);
+  }
+  if (environment === "local") {
+    if (HSK_CHAINS.includes(chainId)) throw new Error("The local environment uses a disposable chain for the registry, never HSK Chain 133 or 177.");
+  } else {
+    const expected = describeNetwork(environment, simulatedProfile).registryChainId;
+    if (chainId !== expected) throw new Error(`The ${environment} environment's registry is on chain ${expected}, not ${chainId}.`);
+    if (url.protocol !== "https:") throw new Error("A live registry RPC URL must use HTTPS.");
+  }
+  const key = env.SETTLEBACK_VERIFIER_PRIVATE_KEY;
+  if (key !== undefined && key !== "" && !/^0x[0-9a-fA-F]{64}$/.test(key)) {
+    // Never echo the value.
+    throw new Error("SETTLEBACK_VERIFIER_PRIVATE_KEY must be 0x followed by 64 hex digits.");
+  }
+  return {
+    rpcUrl,
+    chainId,
+    address: address as `0x${string}`,
+    confirmations: parseBoundedInteger(
+      "SETTLEBACK_REGISTRY_CONFIRMATIONS",
+      env.SETTLEBACK_REGISTRY_CONFIRMATIONS ?? (environment === "local" ? "1" : "3"),
+      1,
+      64,
+    ),
+    verifierPrivateKey: key === undefined || key === "" ? undefined : new Secret(key),
   };
 }
 

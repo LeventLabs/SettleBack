@@ -26,7 +26,7 @@ let operationId: string;
 
 beforeEach(() => {
   db = memoryDatabase();
-  sim = createSimulatedAdapters({ environment: "local", verifier: "0x00000000000000000000000000000000000000f0", webhookSecret: "app-secret" });
+  sim = createSimulatedAdapters({ environment: "local", webhookSecret: "app-secret" });
   operationId = seedOperation(db);
 });
 

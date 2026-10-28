@@ -8,12 +8,11 @@ import {
   type ExecutionPayload,
 } from "../src/index.ts";
 
-const VERIFIER = "0x00000000000000000000000000000000000000f0" as Address;
 
 describe("simulated artifacts cannot enter live environments", () => {
   it("refuses to build simulated adapters outside the local environment", () => {
     for (const environment of ["testnet", "mixed", "mainnet"] as const) {
-      expect(() => createSimulatedAdapters({ environment, verifier: VERIFIER, webhookSecret: "s" }), environment).toThrow(
+      expect(() => createSimulatedAdapters({ environment, webhookSecret: "s" }), environment).toThrow(
         ProvenanceViolationError,
       );
     }
@@ -29,15 +28,14 @@ describe("simulated artifacts cannot enter live environments", () => {
   });
 
   it("labels everything the simulator produces", async () => {
-    const sim = createSimulatedAdapters({ environment: "local", verifier: VERIFIER, webhookSecret: "s" });
+    const sim = createSimulatedAdapters({ environment: "local", webhookSecret: "s" });
     expect(sim.provenance).toBe("SIMULATED");
     expect(sim.rail.provenance).toBe("SIMULATED");
-    expect(sim.registry.provenance).toBe("SIMULATED");
     expect(sim.network.mode).toBe("simulated");
   });
 
   it("refuses to sign or submit a payload that is not marked simulated", async () => {
-    const sim = createSimulatedAdapters({ environment: "local", verifier: VERIFIER, webhookSecret: "s" });
+    const sim = createSimulatedAdapters({ environment: "local", webhookSecret: "s" });
     const live: ExecutionPayload = {
       provenance: "LIVE",
       kind: "payment-mandate",

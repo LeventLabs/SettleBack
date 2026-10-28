@@ -18,7 +18,6 @@ import {
 
 const BUYER = "0x00000000000000000000000000000000000000b1" as Address;
 const SELLER = "0x00000000000000000000000000000000000000a1" as Address;
-const VERIFIER = "0x00000000000000000000000000000000000000f0" as Address;
 const TOKEN = "0x8fe3cb719ee4410e236cd6b72ab1fcdc06ef53c6" as Address;
 const SECRET = "sim-webhook-secret";
 
@@ -40,7 +39,7 @@ const expected: TransferTerms = { payer: BUYER, payee: SELLER, chainId: 133, tok
 let sim: SimulatedAdapters;
 
 beforeEach(() => {
-  sim = createSimulatedAdapters({ environment: "local", verifier: VERIFIER, webhookSecret: SECRET });
+  sim = createSimulatedAdapters({ environment: "local", webhookSecret: SECRET });
 });
 
 /** The Payment Agent's side: validate the received Cart Mandate, then sign the mandate built from it. */
@@ -161,7 +160,7 @@ describe("simulated gateway: faults", () => {
 
   it("never verifies a receipt with the wrong amount, payee, or token", async () => {
     for (const field of ["amount", "payee", "token"] as const) {
-      sim = createSimulatedAdapters({ environment: "local", verifier: VERIFIER, webhookSecret: SECRET });
+      sim = createSimulatedAdapters({ environment: "local", webhookSecret: SECRET });
       sim.gateway.injectFault(order.paymentRequestId, { kind: "wrong-receipt", field });
       await payOnce();
       ticks(5);

@@ -1,8 +1,13 @@
 import { fastify, type FastifyInstance } from "fastify";
 import { describeNetwork } from "@settleback/domain";
+import type { RegistryGateway } from "@settleback/adapters";
 import type { ServerConfig } from "./config.ts";
 
-export function buildApp(config: ServerConfig): FastifyInstance {
+export interface AppDependencies {
+  registry?: RegistryGateway | undefined;
+}
+
+export function buildApp(config: ServerConfig, dependencies: AppDependencies = {}): FastifyInstance {
   const app = fastify({ logger: { level: config.logLevel } });
   const network = describeNetwork(config.environment, config.simulatedProfile);
 
@@ -22,6 +27,15 @@ export function buildApp(config: ServerConfig): FastifyInstance {
     paymentChainId: network.paymentChainId,
     registryChainId: network.registryChainId,
     paymentWrites: config.paymentWritesEnabled ? "enabled" : "disabled",
+    registry:
+      dependencies.registry === undefined
+        ? { status: "not configured", integratedRepayment: "unavailable" }
+        : {
+            status: "connected",
+            chainId: dependencies.registry.chainId,
+            address: dependencies.registry.address,
+            provenance: dependencies.registry.provenance,
+          },
   }));
 
   return app;

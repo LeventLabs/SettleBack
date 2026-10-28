@@ -1,10 +1,13 @@
 import { buildApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { openDatabase } from "./db/database.ts";
+import { connectRegistry } from "./registry/connect.ts";
 
 const config = loadConfig();
 const db = openDatabase({ path: config.databasePath, environment: config.environment });
-const app = buildApp(config);
+// A configured but unreachable or mismatched registry stops startup instead of running without it.
+const registry = await connectRegistry(config.registry, config.environment);
+const app = buildApp(config, { registry });
 app.addHook("onClose", async () => {
   db.close();
 });

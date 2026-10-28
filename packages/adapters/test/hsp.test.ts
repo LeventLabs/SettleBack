@@ -237,7 +237,7 @@ describe("merchant request signing", () => {
 describe("simulated gateway merchant API", () => {
   let sim: SimulatedAdapters;
   beforeEach(() => {
-    sim = createSimulatedAdapters({ environment: "local", verifier: "0x00000000000000000000000000000000000000f0", webhookSecret: "app-secret" });
+    sim = createSimulatedAdapters({ environment: "local", webhookSecret: "app-secret" });
   });
 
   function clientWith(overrides: { appSecret?: string; privateKey?: KeyObject; merchantName?: string } = {}): MerchantClient {

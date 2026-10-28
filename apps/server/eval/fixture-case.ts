@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { Address, PolicyTerms } from "@settleback/domain";
 import { composeCaseEvidence, type ComposedCase } from "@settleback/demo-service";
@@ -61,7 +62,9 @@ export async function setupFixtureCase(db: DatabaseSync, fixtureId: string): Pro
     { operationId: operation.id, requestId: `req-${fixture.id}`, buyer: BUYER as Address, seller: SELLER as Address, chainId: 133, token: TOKEN as Address, tokenDecimals: 6, priceUsd: "1.00" },
     loadSourceBytes(source).toString("utf8"),
   );
-  insertAttempt(db, { id: `att-${fixture.id}`, operationId: operation.id, state: composed.paymentState });
+  // A verified payment has a transaction; the hash is deterministic per operation.
+  const txHash = composed.paymentState === "VERIFIED" ? `0x${createHash("sha256").update(operation.id).digest("hex")}` : undefined;
+  insertAttempt(db, { id: `att-${fixture.id}`, operationId: operation.id, state: composed.paymentState, ...(txHash === undefined ? {} : { txHash }) });
   for (const submission of composed.evidence) ingestEvidence(db, { ...submission, operationId: operation.id, now: NOW });
   const caseId = openCase(db, { operationId: operation.id, openedBy: { role: "buyer", identity: BUYER }, now: NOW }).case.id;
   const run = composed.serviceRun;
@@ -84,10 +87,10 @@ export async function setupFixtureCase(db: DatabaseSync, fixtureId: string): Pro
   return { caseId, operationId: operation.id, composed, lookup, items, item };
 }
 
-export function insertAttempt(db: DatabaseSync, values: { id: string; operationId: string; purpose?: string; state?: string }): void {
+export function insertAttempt(db: DatabaseSync, values: { id: string; operationId: string; purpose?: string; state?: string; txHash?: string }): void {
   db.prepare(
     `INSERT INTO payment_attempts (id, operation_id, purpose, state, payer, payee, chain_id, token, amount_base_units,
-       intent_sha256, deployment_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, 133, ?, '1000000', ?, 'local-registry', ?, ?)`,
-  ).run(values.id, values.operationId, values.purpose ?? "ORIGINAL", values.state ?? "CREATED", BUYER, SELLER, TOKEN, "c".repeat(64), NOW, NOW);
+       intent_sha256, deployment_id, tx_hash, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 133, ?, '1000000', ?, 'local-registry', ?, ?, ?)`,
+  ).run(values.id, values.operationId, values.purpose ?? "ORIGINAL", values.state ?? "CREATED", BUYER, SELLER, TOKEN, "c".repeat(64), values.txHash ?? null, NOW, NOW);
 }

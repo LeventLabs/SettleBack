@@ -112,3 +112,28 @@ export class AssessmentInProgressError extends StoreError {
     super("ASSESSMENT_IN_PROGRESS", `Case ${caseId} already has an assessment in progress for this evidence revision.`);
   }
 }
+
+export class ActionIntegrityError extends StoreError {
+  constructor(message: string) {
+    super("ACTION_INTEGRITY", message);
+  }
+}
+
+export type RecoveryRefusal =
+  | "ROLE_FORBIDDEN"
+  | "REGISTRY_REQUIRED"
+  | "CASE_NOT_READY"
+  | "ACTION_EXISTS"
+  | "NOT_ELIGIBLE"
+  | "ORIGINAL_REFERENCE_MISSING"
+  | "REVISION_CONFLICT"
+  | "REGISTRY_TERMS_MISMATCH"
+  | "ACTION_NOT_FOUND"
+  | "WRONG_ACTION_STATE";
+
+/** A recovery step refused before anything was changed, on chain or in the database. */
+export class RecoveryRefusedError extends StoreError {
+  constructor(code: RecoveryRefusal, message: string) {
+    super(code, message);
+  }
+}

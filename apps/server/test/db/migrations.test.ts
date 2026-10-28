@@ -22,6 +22,7 @@ const EXPECTED_TABLES = [
   "policies",
   "proof_allocations",
   "recovery_actions",
+  "recovery_proposals",
   "schema_migrations",
   "service_jobs",
 ];

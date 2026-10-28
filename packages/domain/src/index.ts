@@ -4,6 +4,7 @@ export * from "./environment.ts";
 export * from "./evidence.ts";
 export * from "./guards.ts";
 export * from "./operation.ts";
+export * from "./recovery-action.ts";
 export * from "./spans.ts";
 export * from "./states.ts";
 export * from "./transitions.ts";

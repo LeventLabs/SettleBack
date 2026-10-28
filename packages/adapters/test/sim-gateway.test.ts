@@ -1,14 +1,18 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Address, TransferTerms } from "@settleback/domain";
 import {
-  RailTimeoutError,
   RailUnavailableError,
   WEBHOOK_RETRY_DELAYS_MS,
+  buildSimulatedPaymentMandate,
   createSimulatedAdapters,
   signSimulatedPayload,
+  submitPaymentMandate,
+  validateCartMandate,
   verifySettlement,
   verifyWebhook,
+  type PreparedPayment,
   type PrepareInput,
+  type SignedPayload,
   type SimulatedAdapters,
 } from "../src/index.ts";
 
@@ -24,8 +28,10 @@ const order: PrepareInput = {
   payee: SELLER,
   chainId: 133,
   token: TOKEN,
+  coin: "USDC",
   tokenDecimals: 6,
   priceUsd: "1.00",
+  label: "Structured extraction job",
   expiresAt: "2026-10-30T12:00:00Z",
 };
 
@@ -37,10 +43,21 @@ beforeEach(() => {
   sim = createSimulatedAdapters({ environment: "local", verifier: VERIFIER, webhookSecret: SECRET });
 });
 
+/** The Payment Agent's side: validate the received Cart Mandate, then sign the mandate built from it. */
+function signFor(prepared: PreparedPayment): SignedPayload {
+  const validation = validateCartMandate({
+    cartMandate: prepared.cartMandate,
+    merchant: { merchantName: "SettleBack Demo Seller", publicKey: sim.merchantPublicKey },
+    intent: order,
+    policy: { payeeAllowlist: [SELLER], perPaymentCapBaseUnits: "5000000", dailyCapBaseUnits: "20000000", spentTodayBaseUnits: "0", maxFeeBaseUnits: "100000", usdRate: "1" },
+    now: sim.clock.now(),
+  });
+  if (!validation.ok) throw new Error(validation.rejections.map((entry) => entry.code).join(", "));
+  return signSimulatedPayload(buildSimulatedPaymentMandate(validation.cart, BUYER));
+}
+
 async function payOnce(): Promise<void> {
-  const prepared = await sim.rail.prepare(order);
-  const payload = await sim.rail.executionPayload(prepared, BUYER);
-  await sim.rail.submit(signSimulatedPayload(payload));
+  await sim.rail.submit(signFor(await sim.rail.prepare(order)));
 }
 
 function ticks(count: number): void {
@@ -92,11 +109,13 @@ describe("simulated gateway: normal payment", () => {
 describe("simulated gateway: faults", () => {
   it("recovers a lost create-order response without creating a second order", async () => {
     sim.gateway.injectFault(order.paymentRequestId, { kind: "lose-create-response" });
-    await expect(sim.rail.prepare(order)).rejects.toBeInstanceOf(RailTimeoutError);
+    // The response is lost after the gateway created the order; prepare reads it back by the same IDs.
     const prepared = await sim.rail.prepare(order);
-    expect(prepared.paymentRequestId).toBe(order.paymentRequestId);
-    expect(prepared.cartSha256).toBeNull();
+    expect(prepared).toMatchObject({ paymentRequestId: order.paymentRequestId, recovered: true, paymentUrl: null });
     expect(sim.gateway.orderCount()).toBe(1);
+    // The recovered Cart Mandate hashes to the same contents, so the payment can proceed on the one order.
+    await sim.rail.submit(signFor(prepared));
+    expect((await sim.rail.observe(order.paymentRequestId)).kind).toBe("SUBMITTED");
   });
 
   it("refuses an order that reuses identifiers with different terms", async () => {
@@ -106,9 +125,8 @@ describe("simulated gateway: faults", () => {
 
   it("after a lost submit response, observation shows the submission and a second submission is refused", async () => {
     sim.gateway.injectFault(order.paymentRequestId, { kind: "lose-submit-response" });
-    const prepared = await sim.rail.prepare(order);
-    const signed = signSimulatedPayload(await sim.rail.executionPayload(prepared, BUYER));
-    await expect(sim.rail.submit(signed)).rejects.toBeInstanceOf(RailTimeoutError);
+    const signed = signFor(await sim.rail.prepare(order));
+    expect(await submitPaymentMandate(sim.rail, signed)).toBe("SUBMITTED");
     expect((await sim.rail.observe(order.paymentRequestId)).kind).toBe("SUBMITTED");
     await expect(sim.rail.submit(signed)).rejects.toMatchObject({ code: "40001" });
   });

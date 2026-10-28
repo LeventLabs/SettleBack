@@ -1,5 +1,6 @@
 import type { TransferTerms } from "@settleback/domain";
 import { decimalToBaseUnits } from "./amounts.ts";
+import { usdUnits } from "./hsp/cart-mandate.ts";
 import { caip2, classifyGatewayRecord, type GatewayPaymentRecord } from "./gateway.ts";
 
 export interface ChainTransfer {
@@ -37,6 +38,8 @@ export interface SettlementCheckInput {
   record: GatewayPaymentRecord;
   transfer: ChainTransfer | null;
   requiredLevel: "SAFE" | "FINAL";
+  /** The pinned USD-per-token rate for the stablecoin. Default "1". */
+  pinnedUsdRate?: string;
 }
 
 /**
@@ -71,6 +74,9 @@ export function verifySettlement(input: SettlementCheckInput): SettlementVerdict
   if (decimalOrNull(record.order_amount, input.tokenDecimals) !== expected.amountBaseUnits) {
     reasons.push("gateway order amount differs from the expected principal");
   }
+  if (record.usd_amount_rate !== null && !sameRate(record.usd_amount_rate, input.pinnedUsdRate ?? "1")) {
+    reasons.push("gateway USD rate differs from the pinned stablecoin rate");
+  }
   if (reasons.length > 0) return { status: "MISMATCH", reasons, txHash };
 
   if (txHash === null) return { status: "INCONSISTENT", reasons: ["gateway reports settlement without a transaction hash"], txHash };
@@ -88,6 +94,11 @@ export function verifySettlement(input: SettlementCheckInput): SettlementVerdict
   if (reasons.length > 0) return { status: "MISMATCH", reasons, txHash };
 
   return { status: "VERIFIED", reasons: [], txHash };
+}
+
+function sameRate(reported: string, pinned: string): boolean {
+  const left = usdUnits(reported);
+  return left !== undefined && left === usdUnits(pinned);
 }
 
 function sameAddress(a: string, b: string): boolean {

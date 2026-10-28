@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import {
+  buildSimulatedPaymentMandate,
   createSimulatedAdapters,
   decimalToBaseUnits,
   signSimulatedPayload,
+  submitPaymentMandate,
+  validateCartMandate,
   verifySettlement,
   type GatewayFault,
   type GatewayPaymentRecord,
@@ -144,13 +147,31 @@ async function runGatewayPayment(
     payee: terms.seller,
     chainId: terms.chainId,
     token: terms.token,
+    coin: "USDC",
     tokenDecimals: terms.tokenDecimals,
     priceUsd: terms.priceUsd,
+    label: "Structured extraction job",
     expiresAt: new Date(sim.clock.now().getTime() + 2 * 60 * 60 * 1000).toISOString(),
   };
   sim.gateway.injectFault(order.paymentRequestId, fault);
+  // Receiving agent: merchant-signed Cart Mandate and order. Payment Agent: validate, then sign once.
   const prepared = await sim.rail.prepare(order);
-  await sim.rail.submit(signSimulatedPayload(await sim.rail.executionPayload(prepared, terms.buyer)));
+  const validation = validateCartMandate({
+    cartMandate: prepared.cartMandate,
+    merchant: { merchantName: prepared.cartMandate.contents.merchant_name, publicKey: sim.merchantPublicKey },
+    intent: order,
+    policy: {
+      payeeAllowlist: [terms.seller],
+      perPaymentCapBaseUnits: "10000000",
+      dailyCapBaseUnits: "50000000",
+      spentTodayBaseUnits: "0",
+      maxFeeBaseUnits: "100000",
+      usdRate: "1",
+    },
+    now: sim.clock.now(),
+  });
+  if (!validation.ok) throw new Error(`simulated Cart Mandate rejected: ${validation.rejections.map((entry) => entry.code).join(", ")}`);
+  await submitPaymentMandate(sim.rail, signSimulatedPayload(buildSimulatedPaymentMandate(validation.cart, terms.buyer)));
 
   let observation = await sim.rail.observe(order.paymentRequestId);
   for (let tick = 0; tick < MAX_GATEWAY_TICKS && !isSettled(observation.record); tick += 1) {

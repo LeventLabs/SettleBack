@@ -41,6 +41,8 @@ describe("simulated artifacts cannot enter live environments", () => {
     const live: ExecutionPayload = {
       provenance: "LIVE",
       kind: "payment-mandate",
+      cartMandateId: "cart-1",
+      cartSha256: "a".repeat(64),
       paymentRequestId: "pr-1",
       payer: "0x00000000000000000000000000000000000000b1",
       payee: "0x00000000000000000000000000000000000000a1",

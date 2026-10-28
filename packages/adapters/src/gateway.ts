@@ -1,6 +1,8 @@
 // Shapes follow the public HashKey Merchant documentation (payment record and webhook fields).
 // Field names stay in the gateway's snake_case because these are external records.
 
+import { RailRejectedError } from "./rail.ts";
+
 export const GATEWAY_STATUSES = [
   "payment-required",
   "payment-submitted",
@@ -33,6 +35,8 @@ export interface GatewayPaymentRecord {
   product_amount: string;
   order_amount: string;
   pay_amount: string;
+  /** USD per token as the gateway applied it; null when the source does not report it (webhooks). */
+  usd_amount_rate: string | null;
   created_at: string;
   included_at: string | null;
   completed_at: string | null;
@@ -69,4 +73,15 @@ export function classifyGatewayRecord(record: GatewayPaymentRecord): Observation
 
 export function caip2(chainId: number): string {
   return `eip155:${chainId}`;
+}
+
+/** A definite gateway refusal, with the error code and HTTP status from the public documentation. */
+export class GatewayError extends RailRejectedError {
+  readonly httpStatus: number;
+
+  constructor(code: string, httpStatus: number, message: string) {
+    super(code, message);
+    this.name = "GatewayError";
+    this.httpStatus = httpStatus;
+  }
 }

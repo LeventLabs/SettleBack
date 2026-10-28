@@ -25,6 +25,7 @@ const finalized: GatewayPaymentRecord = {
   network: "hashkey-testnet",
   product_amount: "1.00",
   order_amount: "1.00",
+  usd_amount_rate: "1",
   pay_amount: "1.01",
   created_at: "2026-10-30T10:00:00Z",
   included_at: "2026-10-30T10:00:30Z",

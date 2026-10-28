@@ -7,4 +7,18 @@ libs = ["lib"]
 solc_version = "0.8.37"
 optimizer = true
 optimizer_runs = 200
-# Confirm the EVM version supported by HashKey Chain (133/177) before any deployment.
+# HSK Chain 133 and 177 block headers carry requestsHash (Prague) as of 28 October 2026; Cancun is
+# targeted because the contracts need no later opcode.
+evm_version = "cancun"
+bytecode_hash = "none"
+cbor_metadata = true
+
+[fuzz]
+runs = 1024
+
+# Measured on 28 October 2026 with these settings, share of runs reaching each outcome: per-case
+# reservation 127/129, standing-policy reservation 101/129, repayment 129/129, retrieval 128/129.
+[invariant]
+runs = 128
+depth = 256
+fail_on_revert = false

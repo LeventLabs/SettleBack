@@ -16,10 +16,11 @@ forge test --mc Invariant  # invariant suite only (about a minute)
 
 ## Deployment
 
-Keys are used from Foundry's encrypted keystore, never as command-line arguments. The deployer pays gas and has no authority over either contract. The verifier is a separate key, fixed in the registry for its lifetime.
+Keys are never passed as command-line arguments. The scripts sign either with an account from Foundry's encrypted keystore (`--account`), or with `DEPLOYER_PRIVATE_KEY` from `contracts/.env`, which git ignores and the server never loads; in that case the key must belong to `DEPLOYER_ADDRESS` and be written as `0x` plus 64 hex digits, or the script stops before sending anything. The deployer pays gas and has no authority over either contract. The verifier is a separate key, fixed in the registry for its lifetime.
 
 ```bash
 # One-time: import the deployer key and create the verifier key (both prompt for a password).
+install -d -m 700 ~/.foundry/keystores   # cast wallet new does not create it
 cast wallet import settleback-deployer --interactive
 cast wallet new ~/.foundry/keystores settleback-verifier
 

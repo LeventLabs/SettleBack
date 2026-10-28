@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.37;
 
-import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
 import {RecoveryRegistry} from "../src/RecoveryRegistry.sol";
 import {SettleBackDeploymentMarker} from "../src/SettleBackDeploymentMarker.sol";
+import {DeployBase} from "./DeployBase.sol";
 
 /// @notice Deploys the deployment marker to HSK Chain mainnet (177), pointing at the registry on
 ///         testnet (133). Before broadcasting it reads the registry on 133 and refuses to point at
@@ -13,7 +13,9 @@ import {SettleBackDeploymentMarker} from "../src/SettleBackDeploymentMarker.sol"
 ///   COMMIT_SHA=$(git rev-parse HEAD) REGISTRY_ADDRESS=0x... SETTLEBACK_VERIFIER=0x... \
 ///   forge script script/DeployMarker.s.sol:DeployMarker \
 ///     --rpc-url https://mainnet.hsk.xyz --account <keystore> --sender <deployer> --broadcast
-contract DeployMarker is Script {
+///
+/// or with DEPLOYER_PRIVATE_KEY and DEPLOYER_ADDRESS in contracts/.env (see DeployBase).
+contract DeployMarker is DeployBase {
     uint256 internal constant HSK_MAINNET = 177;
     uint256 internal constant HSK_TESTNET = 133;
 
@@ -23,6 +25,7 @@ contract DeployMarker is Script {
         address registry = vm.envAddress("REGISTRY_ADDRESS");
         address verifier = vm.envAddress("SETTLEBACK_VERIFIER");
         string memory registryRpc = vm.envOr("REGISTRY_RPC_URL", string("https://testnet.hsk.xyz"));
+        (uint256 key,) = deployerKey();
 
         uint256 mainnet = vm.activeFork();
         vm.selectFork(vm.createFork(registryRpc));
@@ -35,7 +38,7 @@ contract DeployMarker is Script {
         require(RecoveryRegistry(registry).verifier() == verifier, "DeployMarker: registry verifier differs");
         vm.selectFork(mainnet);
 
-        vm.startBroadcast();
+        startBroadcastAs(key);
         marker = new SettleBackDeploymentMarker(commit, HSK_TESTNET, registry);
         vm.stopBroadcast();
 

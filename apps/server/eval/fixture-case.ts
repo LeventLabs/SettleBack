@@ -31,21 +31,27 @@ export interface FixtureCaseSetup {
   item(source: EvidenceRecord["source"]): EvidenceRecord;
 }
 
+/** The buyer and seller of a fixture operation; tests that sign in as them pass addresses they hold keys for. */
+export interface FixtureParties {
+  buyer: string;
+  seller: string;
+}
+
 /** Runs the components for a fixture, records their evidence, opens the case, and connects a lookup to the same services. */
-export async function setupFixtureCase(db: DatabaseSync, fixtureId: string): Promise<FixtureCaseSetup> {
+export async function setupFixtureCase(db: DatabaseSync, fixtureId: string, parties: FixtureParties = { buyer: BUYER, seller: SELLER }): Promise<FixtureCaseSetup> {
   const fixture = loadCases().find((entry) => entry.id === fixtureId);
   const source = loadSources()[0];
   if (fixture === undefined || source === undefined) throw new Error(`fixture ${fixtureId} missing`);
   const policy = TERMS.get(fixture.policyId);
   if (policy === undefined) throw new Error(`no terms for ${fixture.policyId}`);
   const { operation } = createOperation(db, {
-    actor: BUYER,
+    actor: parties.buyer,
     idempotencyKey: `key-${fixture.id}`,
     environment: "local",
     now: NOW,
     intent: {
-      buyer: BUYER,
-      seller: SELLER,
+      buyer: parties.buyer,
+      seller: parties.seller,
       serviceId: "structured-extraction",
       requestSha256: source.sourceSha256,
       policyId: policy.id,
@@ -59,14 +65,14 @@ export async function setupFixtureCase(db: DatabaseSync, fixtureId: string): Pro
   });
   const composed = await composeCaseEvidence(
     fixture,
-    { operationId: operation.id, requestId: `req-${fixture.id}`, buyer: BUYER as Address, seller: SELLER as Address, chainId: 133, token: TOKEN as Address, tokenDecimals: 6, priceUsd: "1.00" },
+    { operationId: operation.id, requestId: `req-${fixture.id}`, buyer: parties.buyer as Address, seller: parties.seller as Address, chainId: 133, token: TOKEN as Address, tokenDecimals: 6, priceUsd: "1.00" },
     loadSourceBytes(source).toString("utf8"),
   );
   // A verified payment has a transaction; the hash is deterministic per operation.
   const txHash = composed.paymentState === "VERIFIED" ? `0x${createHash("sha256").update(operation.id).digest("hex")}` : undefined;
-  insertAttempt(db, { id: `att-${fixture.id}`, operationId: operation.id, state: composed.paymentState, ...(txHash === undefined ? {} : { txHash }) });
+  insertAttempt(db, { id: `att-${fixture.id}`, operationId: operation.id, state: composed.paymentState, payer: parties.buyer, payee: parties.seller, ...(txHash === undefined ? {} : { txHash }) });
   for (const submission of composed.evidence) ingestEvidence(db, { ...submission, operationId: operation.id, now: NOW });
-  const caseId = openCase(db, { operationId: operation.id, openedBy: { role: "buyer", identity: BUYER }, now: NOW }).case.id;
+  const caseId = openCase(db, { operationId: operation.id, openedBy: { role: "buyer", identity: parties.buyer }, now: NOW }).case.id;
   const run = composed.serviceRun;
   const lookup: ResultLookup = {
     jobStatus: async (operationId) => {
@@ -91,10 +97,13 @@ export async function setupFixtureCase(db: DatabaseSync, fixtureId: string): Pro
   return { caseId, operationId: operation.id, composed, lookup, items, item };
 }
 
-export function insertAttempt(db: DatabaseSync, values: { id: string; operationId: string; purpose?: string; state?: string; txHash?: string }): void {
+export function insertAttempt(
+  db: DatabaseSync,
+  values: { id: string; operationId: string; purpose?: string; state?: string; txHash?: string; payer?: string; payee?: string },
+): void {
   db.prepare(
     `INSERT INTO payment_attempts (id, operation_id, purpose, state, payer, payee, chain_id, token, amount_base_units,
        intent_sha256, deployment_id, tx_hash, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, 133, ?, '1000000', ?, 'local-registry', ?, ?, ?)`,
-  ).run(values.id, values.operationId, values.purpose ?? "ORIGINAL", values.state ?? "CREATED", BUYER, SELLER, TOKEN, "c".repeat(64), values.txHash ?? null, NOW, NOW);
+  ).run(values.id, values.operationId, values.purpose ?? "ORIGINAL", values.state ?? "CREATED", values.payer ?? BUYER, values.payee ?? SELLER, TOKEN, "c".repeat(64), values.txHash ?? null, NOW, NOW);
 }

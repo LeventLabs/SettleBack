@@ -1,7 +1,7 @@
 import type { AssessmentPrompt } from "@settleback/domain";
 import type { AssessmentProvider, ProviderReply } from "../../src/recovery/provider.ts";
 
-export { TERMS, registerFixturePolicies, setupFixtureCase, type FixtureCaseSetup } from "../../eval/fixture-case.ts";
+export { TERMS, registerFixturePolicies, setupFixtureCase, type FixtureCaseSetup, type FixtureParties } from "../../eval/fixture-case.ts";
 
 export const MODEL = "claude-opus-5-5";
 

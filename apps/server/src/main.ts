@@ -7,7 +7,7 @@ const config = loadConfig();
 const db = openDatabase({ path: config.databasePath, environment: config.environment });
 // A configured but unreachable or mismatched registry stops startup instead of running without it.
 const registry = await connectRegistry(config.registry, config.environment);
-const app = buildApp(config, { registry });
+const app = buildApp(config, { db, registry });
 app.addHook("onClose", async () => {
   db.close();
 });

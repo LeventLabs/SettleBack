@@ -12,6 +12,7 @@ describe("loadConfig", () => {
       databasePath: expect.stringMatching(/\/data\/settleback-local\.db$/),
       simulatedProfile: "testnet",
       assessment: { model: "claude-opus-5-5", effort: "medium", maxTokens: 8000, timeoutMs: 45000, apiKey: undefined },
+      auth: { webOrigin: "http://localhost:5173", operators: [] },
     });
   });
 
@@ -22,7 +23,7 @@ describe("loadConfig", () => {
   });
 
   it("uses a separate default database per environment and honors an explicit path", () => {
-    expect(loadConfig({ SETTLEBACK_ENV: "testnet" }).databasePath).toMatch(/\/data\/settleback-testnet\.db$/);
+    expect(loadConfig({ SETTLEBACK_ENV: "testnet", SETTLEBACK_WEB_ORIGIN: "https://settleback.xyz" }).databasePath).toMatch(/\/data\/settleback-testnet\.db$/);
     expect(loadConfig({ SETTLEBACK_DB_PATH: "/tmp/x.db" }).databasePath).toBe("/tmp/x.db");
   });
 
@@ -82,6 +83,7 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...local, SETTLEBACK_REGISTRY_ADDRESS: "0x123" })).toThrow(/20-byte/);
     const testnet = {
       SETTLEBACK_ENV: "testnet",
+      SETTLEBACK_WEB_ORIGIN: "https://settleback.xyz",
       SETTLEBACK_REGISTRY_RPC_URL: "https://testnet.hsk.xyz",
       SETTLEBACK_REGISTRY_CHAIN_ID: "133",
       SETTLEBACK_REGISTRY_ADDRESS: "0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C",
@@ -90,6 +92,25 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ ...testnet, SETTLEBACK_REGISTRY_CHAIN_ID: "177" })).toThrow(/chain 133, not 177/);
     expect(() => loadConfig({ ...testnet, SETTLEBACK_REGISTRY_RPC_URL: "http://testnet.hsk.xyz" })).toThrow(/HTTPS/);
     expect(() => loadConfig({ SETTLEBACK_VERIFIER_PRIVATE_KEY: `0x${"1".repeat(64)}` })).toThrow(/no registry is configured/);
+  });
+
+  it("requires a bare HTTPS web origin outside local development", () => {
+    expect(loadConfig({ SETTLEBACK_WEB_ORIGIN: "http://127.0.0.1:4173" }).auth.webOrigin).toBe("http://127.0.0.1:4173");
+    expect(loadConfig({ SETTLEBACK_ENV: "mainnet", SETTLEBACK_WEB_ORIGIN: "https://settleback.xyz" }).auth.webOrigin).toBe("https://settleback.xyz");
+    for (const environment of ["testnet", "mixed", "mainnet"]) {
+      expect(() => loadConfig({ SETTLEBACK_ENV: environment }), environment).toThrow(/SETTLEBACK_WEB_ORIGIN is required/);
+      expect(() => loadConfig({ SETTLEBACK_ENV: environment, SETTLEBACK_WEB_ORIGIN: "http://localhost:5173" }), environment).toThrow(/must use HTTPS,/);
+    }
+    for (const origin of ["https://settleback.xyz/", "https://settleback.xyz/app", "https://settleback.xyz?x=1", "settleback.xyz"]) {
+      expect(() => loadConfig({ SETTLEBACK_WEB_ORIGIN: origin }), origin).toThrow(/SETTLEBACK_WEB_ORIGIN/);
+    }
+    expect(() => loadConfig({ SETTLEBACK_WEB_ORIGIN: "http://example.com" })).toThrow(/HTTPS or a loopback HTTP origin/);
+  });
+
+  it("takes operators only from configured addresses, normalized and deduplicated", () => {
+    const operator = "0x8626f6940E2eb28930eFb4CeF49B2d1F2C9C1199";
+    expect(loadConfig({ SETTLEBACK_OPERATORS: ` ${operator}, ${operator.toLowerCase()} ,` }).auth.operators).toEqual([operator.toLowerCase()]);
+    expect(() => loadConfig({ SETTLEBACK_OPERATORS: "operator-1" })).toThrow(/SETTLEBACK_OPERATORS/);
   });
 
   it("keeps the verifier key out of JSON and error messages", () => {

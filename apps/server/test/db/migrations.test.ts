@@ -25,6 +25,7 @@ const EXPECTED_TABLES = [
   "recovery_proposals",
   "schema_migrations",
   "service_jobs",
+  "sessions",
 ];
 
 describe("openDatabase", () => {

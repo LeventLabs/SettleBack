@@ -55,6 +55,14 @@ export interface ServerConfig {
   assessment: AssessmentConfig;
   /** Undefined when no registry is configured; integrated repayment is then unavailable. */
   registry: RegistryConfig | undefined;
+  auth: AuthConfig;
+}
+
+export interface AuthConfig {
+  /** The only origin writes are accepted from, and the domain and URI wallets are asked to sign in to. */
+  webOrigin: string;
+  /** Lowercase wallet addresses that sign in as operators. No request can grant the role. */
+  operators: readonly `0x${string}`[];
 }
 
 export interface RegistryConfig {
@@ -100,7 +108,43 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       apiKey: parseApiKey(env.ANTHROPIC_API_KEY),
     },
     registry: parseRegistry(env, environment, env.SETTLEBACK_SIM_PROFILE === undefined ? "testnet" : parseNetworkProfile(env.SETTLEBACK_SIM_PROFILE)),
+    auth: { webOrigin: parseWebOrigin(env.SETTLEBACK_WEB_ORIGIN, environment), operators: parseOperators(env.SETTLEBACK_OPERATORS ?? "") },
   };
+}
+
+const LOCAL_WEB_ORIGIN = "http://localhost:5173";
+const LOOPBACK_HOSTS = ["localhost", "127.0.0.1"];
+
+/**
+ * A bare origin (scheme, host, optional port). A live environment must name its HTTPS origin; plain
+ * HTTP is accepted only for a loopback host in the local environment.
+ */
+function parseWebOrigin(value: string | undefined, environment: Environment): string {
+  if (value === undefined || value === "") {
+    if (environment === "local") return LOCAL_WEB_ORIGIN;
+    throw new Error(`SETTLEBACK_WEB_ORIGIN is required for the "${environment}" environment.`);
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`SETTLEBACK_WEB_ORIGIN is not a URL, got "${value}".`);
+  }
+  if (url.origin !== value) throw new Error(`SETTLEBACK_WEB_ORIGIN must be a bare origin such as https://settleback.xyz, got "${value}".`);
+  if (url.protocol === "https:") return value;
+  if (url.protocol === "http:" && environment === "local" && LOOPBACK_HOSTS.includes(url.hostname)) return value;
+  throw new Error(`SETTLEBACK_WEB_ORIGIN must use HTTPS${environment === "local" ? " or a loopback HTTP origin" : ""}, got "${value}".`);
+}
+
+function parseOperators(value: string): `0x${string}`[] {
+  const operators = new Set<`0x${string}`>();
+  for (const entry of value.split(",")) {
+    const address = entry.trim();
+    if (address === "") continue;
+    if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new Error(`SETTLEBACK_OPERATORS must be comma-separated 20-byte hex addresses, got "${address}".`);
+    operators.add(address.toLowerCase() as `0x${string}`);
+  }
+  return [...operators];
 }
 
 const HSK_CHAINS = [133, 177];

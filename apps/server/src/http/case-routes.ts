@@ -1,9 +1,9 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance } from "fastify";
-import type { RegistryGateway } from "@settleback/adapters";
+import type { RegistryGateway, WalletCall } from "@settleback/adapters";
 import type { PolicyTerms } from "@settleback/domain";
 import type { Session } from "../auth/sessions.ts";
-import { getDeliveryAck, getRecoveryActionForCase } from "../db/actions.ts";
+import { getDeliveryAck, getRecoveryActionForCase, type RecoveryActionRecord } from "../db/actions.ts";
 import { listAssessments } from "../db/assessments.ts";
 import { openCase, readCaseEvidence, readCaseForOperation } from "../db/cases.ts";
 import { readTransaction } from "../db/database.ts";
@@ -12,11 +12,12 @@ import { getOperation, type OperationRecord } from "../db/operations.ts";
 import { getOriginalPayment } from "../db/payments.ts";
 import { confirmRepaymentReservation, prepareRecovery } from "../recovery/actions.ts";
 import { assessCase } from "../recovery/assessment.ts";
+import { readCaseBaseline } from "../recovery/baseline.ts";
 import type { AssessmentProvider } from "../recovery/provider.ts";
 import { liveAttempt, requestRepayment, type RepaymentPayments } from "../recovery/repayment.ts";
 import { acknowledgeDelivery, retrieveResult, type ResultLookup } from "../recovery/retrieval.ts";
 import type { RequestGuard } from "./guard.ts";
-import { actionView, assessmentView, attemptView, caseView, operationView, type Relation } from "./views.ts";
+import { actionView, assessmentView, attemptView, caseSummaryView, caseView, operationView, type Relation } from "./views.ts";
 
 export interface CaseRouteDependencies {
   db: DatabaseSync;
@@ -69,15 +70,65 @@ export function registerCaseRoutes(app: FastifyInstance, deps: CaseRouteDependen
     return { created: opened.created, case: { id: opened.case.id, status: opened.case.status } };
   });
 
+  // The cases the signed-in account may see: its own as buyer or seller, or every case for an operator.
+  app.get("/api/cases", async (request) => {
+    const session = guard.session(request, { wallet: false });
+    const operator = session.roles.includes("operator");
+    return readTransaction(db, () => {
+      const rows = db
+        .prepare(
+          `SELECT c.id, c.operation_id, c.status, c.updated_at, o.buyer, o.seller, o.service_id, o.price_usd, o.policy_id, a.action, a.state AS action_state
+           FROM cases c JOIN operations o ON o.id = c.operation_id LEFT JOIN recovery_actions a ON a.case_id = c.id
+           WHERE ? OR o.buyer = ? OR o.seller = ?
+           ORDER BY c.created_at DESC, c.id LIMIT 200`,
+        )
+        .all(operator ? 1 : 0, session.address, session.address);
+      return {
+        cases: rows.map((row) => {
+          const relations: Relation[] = [];
+          if (row.buyer === session.address) relations.push("buyer");
+          if (row.seller === session.address) relations.push("seller");
+          if (operator) relations.push("operator");
+          const caseId = String(row.id);
+          const rules = deps.terms.has(String(row.policy_id)) ? readCaseBaseline(db, caseId, deps.terms).result : undefined;
+          return caseSummaryView({
+            rules,
+            id: caseId,
+            operationId: String(row.operation_id),
+            status: String(row.status),
+            relations,
+            serviceId: String(row.service_id),
+            priceUsd: String(row.price_usd),
+            action: row.action === null ? null : String(row.action),
+            actionState: row.action_state === null ? null : String(row.action_state),
+            updatedAt: String(row.updated_at),
+          });
+        }),
+      };
+    });
+  });
+
   app.get("/api/cases/:id", { schema: { params: ID_PARAMS } }, async (request) => {
     const session = guard.session(request, { wallet: false });
     const { id } = request.params as { id: string };
     return readTransaction(db, () => {
       const { operation, relations } = scopeCase(db, session, id);
-      const { case: caseRecord, items } = readCaseEvidence(db, id);
       const action = getRecoveryActionForCase(db, id);
-      const repayment = action?.action === "REPAY" ? liveAttempt(db, action) : undefined;
-      return caseView(caseRecord, relations, items, action, getDeliveryAck(db, operation.id), listAssessments(db, id), repayment);
+      const rules = deps.terms.has(operation.policyId) ? readCaseBaseline(db, id, deps.terms) : undefined;
+      const { case: caseRecord, items } = rules ?? readCaseEvidence(db, id);
+      return caseView({
+        caseRecord,
+        relations,
+        operation,
+        payment: getOriginalPayment(db, operation.id),
+        items,
+        rules: rules?.result,
+        action,
+        ack: getDeliveryAck(db, operation.id),
+        assessments: listAssessments(db, id),
+        repayment: action?.action === "REPAY" ? liveAttempt(db, action) : undefined,
+        sellerCall: awaitingSeller(action, relations, deps.registry),
+      });
     });
   });
 
@@ -196,6 +247,15 @@ export function registerCaseRoutes(app: FastifyInstance, deps: CaseRouteDependen
       };
     },
   );
+}
+
+/** The seller's reservation call for a per-case repayment that still waits for it, on the registry the proposal names. */
+function awaitingSeller(action: RecoveryActionRecord | undefined, relations: readonly Relation[], registry: RegistryGateway | undefined): WalletCall | null {
+  if (action === undefined || action.action !== "REPAY" || action.state !== "PREPARED" || action.authorizationMode !== "PER_CASE") return null;
+  if (!relations.includes("seller") || registry === undefined) return null;
+  const named = action.proposal.registry;
+  if (named.chainId !== registry.chainId || named.address.toLowerCase() !== registry.address.toLowerCase()) return null;
+  return registry.reserveRepaymentCall(action.proposal.caseKey);
 }
 
 function relationsTo(session: Session, operation: OperationRecord): Relation[] {

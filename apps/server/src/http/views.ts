@@ -1,4 +1,5 @@
-import type { PaymentFacts } from "@settleback/domain";
+import type { WalletCall } from "@settleback/adapters";
+import type { BaselineResult, PaymentFacts } from "@settleback/domain";
 import type { RecoveryActionRecord, DeliveryAckRecord } from "../db/actions.ts";
 import type { AssessmentRecord } from "../db/assessments.ts";
 import type { CaseRecord } from "../db/cases.ts";
@@ -35,15 +36,24 @@ export function operationView(operation: OperationRecord, relations: readonly Re
   };
 }
 
-export function caseView(
-  caseRecord: CaseRecord,
-  relations: readonly Relation[],
-  items: readonly EvidenceRecord[],
-  action: RecoveryActionRecord | undefined,
-  ack: DeliveryAckRecord | undefined,
-  assessments: readonly AssessmentRecord[],
-  repayment: PaymentAttemptRecord | undefined,
-) {
+export interface CaseViewInput {
+  caseRecord: CaseRecord;
+  relations: readonly Relation[];
+  operation: OperationRecord;
+  payment: PaymentFacts | undefined;
+  items: readonly EvidenceRecord[];
+  /** The rules-only result for the current evidence, or undefined when the policy's terms are not loaded. */
+  rules: BaselineResult | undefined;
+  action: RecoveryActionRecord | undefined;
+  ack: DeliveryAckRecord | undefined;
+  assessments: readonly AssessmentRecord[];
+  repayment: PaymentAttemptRecord | undefined;
+  /** The reservation the seller's wallet sends, while a per-case repayment waits for it. */
+  sellerCall: WalletCall | null;
+}
+
+export function caseView(input: CaseViewInput) {
+  const { caseRecord, relations, operation, items, action, ack, repayment } = input;
   const internals = seesInternals(relations);
   return {
     id: caseRecord.id,
@@ -51,6 +61,18 @@ export function caseView(
     relations,
     status: caseRecord.status,
     revision: caseRecord.revision,
+    operation: {
+      buyer: operation.buyer,
+      seller: operation.seller,
+      serviceId: operation.serviceId,
+      policyId: operation.policyId,
+      chainId: operation.chainId,
+      token: operation.token,
+      priceUsd: operation.priceUsd,
+      amountBaseUnits: operation.amountBaseUnits,
+      createdAt: operation.createdAt,
+    },
+    originalPayment: input.payment === undefined ? null : { id: input.payment.id, state: input.payment.state },
     evidence: {
       revision: caseRecord.evidence.revision,
       sha256: caseRecord.evidence.sha256,
@@ -66,13 +88,51 @@ export function caseView(
         ...(internals ? { content: item.content, redactions: item.redactions } : {}),
       })),
     },
+    rules: input.rules === undefined ? null : internals ? input.rules : withoutRecordQuotes(input.rules, items),
     recoveryAction: action === undefined ? null : actionView(action),
+    sellerCall: input.sellerCall,
     repayment: repayment === undefined ? null : attemptView(repayment),
     delivery: ack === undefined ? null : { artifactSha256: ack.artifactSha256, acknowledgedAt: ack.acknowledgedAt },
-    ...(internals ? { assessments: assessments.map(assessmentView) } : {}),
+    ...(internals ? { assessments: input.assessments.map(assessmentView) } : {}),
     openedBy: caseRecord.openedBy,
     createdAt: caseRecord.createdAt,
     updatedAt: caseRecord.updatedAt,
+  };
+}
+
+/** The rules' findings for a party who may not read the seller's records: quotes only from the bound terms. */
+function withoutRecordQuotes(rules: BaselineResult, items: readonly EvidenceRecord[]): BaselineResult {
+  const terms = new Set(items.filter((item) => item.provenance === "POLICY").map((item) => item.id));
+  return {
+    ...rules,
+    findings: rules.findings.map((finding) => ({ ...finding, citations: finding.citations.filter((citation) => terms.has(citation.evidenceId)) })),
+  };
+}
+
+export interface CaseSummaryRow {
+  rules: BaselineResult | undefined;
+  id: string;
+  operationId: string;
+  status: string;
+  relations: readonly Relation[];
+  serviceId: string;
+  priceUsd: string;
+  action: string | null;
+  actionState: string | null;
+  updatedAt: string;
+}
+
+export function caseSummaryView(row: CaseSummaryRow) {
+  return {
+    id: row.id,
+    operationId: row.operationId,
+    status: row.status,
+    relations: row.relations,
+    serviceId: row.serviceId,
+    priceUsd: row.priceUsd,
+    recovery: row.action === null ? null : { action: row.action, state: row.actionState },
+    rules: row.rules === undefined ? null : row.rules.outcome === "RESOLVES" ? { outcome: "RESOLVES", action: row.rules.action } : { outcome: "ABSTAINS", action: null },
+    updatedAt: row.updatedAt,
   };
 }
 

@@ -189,9 +189,13 @@ describe("per-case repayment over HTTP", () => {
     const prepared = (await call(app, asSeller, "POST", `/api/cases/${setup.caseId}/recovery/prepare`)).json();
     const early = await call(app, asSeller, "POST", url);
     expect([early.statusCode, errorCode(early)]).toEqual([409, "WRONG_ACTION_STATE"]);
+    // The case keeps offering the seller its reservation call until the chain confirms it; the buyer never sees one.
+    expect((await call(app, asSeller, "GET", `/api/cases/${setup.caseId}`)).json().sellerCall).toEqual(prepared.sellerCall);
+    expect((await call(app, asBuyer, "GET", `/api/cases/${setup.caseId}`)).json().sellerCall).toBeNull();
     const bySeller = await chain.sendAs(parties.seller as Address, prepared.sellerCall);
     await chain.mined(bySeller);
     expect((await call(app, asSeller, "POST", `/api/cases/${setup.caseId}/recovery/approval-tx`, { payload: { txHash: bySeller } })).json().status).toBe("CONFIRMED");
+    expect((await call(app, asSeller, "GET", `/api/cases/${setup.caseId}`)).json().sellerCall).toBeNull();
 
     expect(errorCode(await call(app, asBuyer, "POST", url))).toBe("ROLE_FORBIDDEN");
     expect(errorCode(await call(app, asStranger, "POST", url))).toBe("NOT_FOUND");
@@ -287,6 +291,38 @@ describe("authorization", () => {
     // The configured operator sees every case and may open one and request an assessment.
     expect((await call(app, asOperator, "GET", `/api/operations/${setup.operationId}`)).json().relations).toEqual(["operator"]);
     expect((await call(app, asOperator, "POST", `/api/operations/${setup.operationId}/case`)).json()).toMatchObject({ created: false, case: { id: setup.caseId } });
+  });
+
+  it("lists only the cases an account is party to, and every case for an operator", async () => {
+    const { setup, app } = await preparedRetrieval();
+    const other = await setupFixtureCase(db, "refundable-failure-per-case");
+    const [asBuyer, asSeller, asStranger, asOperator] = await Promise.all([signIn(app, buyer), signIn(app, seller), signIn(app, stranger), signIn(app, operator)]);
+    const ids = async (caller: Caller) => ((await call(app, caller, "GET", "/api/cases")).json().cases as { id: string }[]).map((entry) => entry.id).sort();
+    expect(await ids(asBuyer)).toEqual([setup.caseId]);
+    expect(await ids(asSeller)).toEqual([setup.caseId]);
+    expect(await ids(asStranger)).toEqual([]);
+    expect(await ids(asOperator)).toEqual([setup.caseId, other.caseId].sort());
+    const [listed] = (await call(app, asBuyer, "GET", "/api/cases")).json().cases;
+    expect(listed).toMatchObject({ operationId: setup.operationId, relations: ["buyer"], priceUsd: "1.00", recovery: { action: "RETRIEVE", state: "RESERVED" }, rules: { outcome: "RESOLVES", action: "RETRIEVE" } });
+    expect((await call(app, undefined, "GET", "/api/cases")).statusCode).toBe(401);
+  });
+
+  it("shows the operation, the original payment, and the rules' result with the case", async () => {
+    const { setup, app } = await preparedRetrieval();
+    const view = (await call(app, await signIn(app, buyer), "GET", `/api/cases/${setup.caseId}`)).json();
+    expect(view.operation).toMatchObject({ buyer: parties.buyer, seller: parties.seller, priceUsd: "1.00", amountBaseUnits: "1000000", chainId: 133 });
+    expect(view.originalPayment).toMatchObject({ state: "VERIFIED" });
+    expect(view.rules).toMatchObject({ outcome: "RESOLVES", action: "RETRIEVE" });
+    // The buyer sees the rules quote only the bound terms, never the seller's own records.
+    const policyIds = (view.evidence.items as { id: string; provenance: string }[]).filter((item) => item.provenance === "POLICY").map((item) => item.id);
+    const buyerCitations = (view.rules.findings as { citations: { evidenceId: string }[] }[]).flatMap((finding) => finding.citations);
+    expect(buyerCitations.length).toBeGreaterThan(0);
+    expect(buyerCitations.every((citation) => policyIds.includes(citation.evidenceId))).toBe(true);
+    const sellerView = (await call(app, await signIn(app, seller), "GET", `/api/cases/${setup.caseId}`)).json();
+    const sellerCitations = (sellerView.rules.findings as { citations: { evidenceId: string }[] }[]).flatMap((finding) => finding.citations);
+    expect(sellerCitations.some((citation) => !policyIds.includes(citation.evidenceId))).toBe(true);
+    const noTerms = server(setup, { terms: new Map() });
+    expect((await call(noTerms, await signIn(noTerms, buyer), "GET", `/api/cases/${setup.caseId}`)).json().rules).toBeNull();
   });
 
   it("ignores any role a request claims for itself", async () => {

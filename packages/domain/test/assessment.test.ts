@@ -3,6 +3,7 @@ import {
   ASSESSMENT_LIMITS,
   BASELINE_RULES_VERSION,
   buildAssessmentPrompt,
+  checkArtifactLead,
   checkSpan,
   decideAssessment,
   readArtifactLead,
@@ -232,5 +233,15 @@ describe("reading the services' answers to a lead lookup", () => {
     expect(readArtifactLead(DIGEST, status, JSON.stringify([{ ...ARTIFACT, sha256: OTHER, currentSha256: OTHER }]))?.artifact).toBeUndefined();
     expect(readArtifactLead(DIGEST, "{not json", "[]")).toBeUndefined();
     expect(readArtifactLead(DIGEST, status, '{"sha256": "x"}')).toBeUndefined();
+  });
+
+  it("uses the record this operation's job wrote when the store holds the same bytes from several jobs", () => {
+    const status = JSON.stringify({ ...STATUS, history: [] });
+    const fromOtherJob = { ...ARTIFACT, writer: "wk-9999" };
+    const both = readArtifactLead(DIGEST, status, JSON.stringify([fromOtherJob, ARTIFACT]));
+    expect(both?.artifact).toEqual(ARTIFACT);
+    expect(both === undefined ? ["unreadable"] : checkArtifactLead("op-1", both, [])).toEqual([]);
+    const onlyOther = readArtifactLead(DIGEST, status, JSON.stringify([fromOtherJob]));
+    expect(onlyOther === undefined ? [] : checkArtifactLead("op-1", onlyOther, []).map((reason) => reason.code)).toEqual(["LEAD_WRITER_MISMATCH"]);
   });
 });

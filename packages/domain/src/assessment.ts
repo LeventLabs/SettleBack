@@ -307,7 +307,11 @@ export function readArtifactLead(digest: string, jobStatus: string | null, artif
   if (jobStatus !== null && status === undefined) return undefined;
   const records = parseArtifactRecords(artifactRecords);
   if (records === undefined) return undefined;
-  return { digest, status, artifact: records.find((record) => record.sha256 === digest) };
+  // A content-addressed store can hold the same bytes written by several jobs; the record that
+  // matters is the one this operation's job wrote, and any other leaves the writer check to refuse.
+  const matching = records.filter((record) => record.sha256 === digest);
+  const ownJob = status?.externalJobId ?? null;
+  return { digest, status, artifact: matching.find((record) => ownJob !== null && record.writer === ownJob) ?? matching[0] };
 }
 
 export type DecisionCode =

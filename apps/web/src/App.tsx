@@ -1,75 +1,159 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { ApiError, api, describeError } from "./api.ts";
+import { CaseList } from "./CaseList.tsx";
+import { CaseWorkspace } from "./CaseWorkspace.tsx";
+import { short } from "./format.ts";
+import type { Health, Session, SignInChallenge } from "./types.ts";
+import { connectWallet, currentAccount, hasWallet, signMessage, watchWallet, type WalletAccount } from "./wallet.ts";
 
-interface Health {
-  environment: string;
-  mode: "simulated" | "live";
-  networkLabel: string;
-  paymentWrites: "enabled" | "disabled";
-}
+type Loadable<T> = { status: "loading" } | { status: "ready"; value: T } | { status: "unavailable"; reason: string };
 
-type HealthState =
-  | { status: "loading" }
-  | { status: "ready"; health: Health }
-  | { status: "unavailable"; reason: string };
+export function App() {
+  const [health, setHealth] = useState<Loadable<Health>>({ status: "loading" });
+  const [session, setSession] = useState<Session | null | undefined>(undefined);
+  const [wallet, setWallet] = useState<WalletAccount | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
 
-function isHealth(value: unknown): value is Health {
-  if (typeof value !== "object" || value === null) return false;
-  const record = value as Record<string, unknown>;
+  useEffect(() => {
+    api<Health>("/api/health").then(
+      (value) => setHealth({ status: "ready", value }),
+      (error: unknown) => setHealth({ status: "unavailable", reason: describeError(error) }),
+    );
+    api<Session>("/api/auth/session").then(setSession, (error: unknown) => {
+      setSession(null);
+      if (!(error instanceof ApiError && error.status === 401)) setNotice(describeError(error));
+    });
+    currentAccount().then(setWallet, () => setWallet(null));
+  }, []);
+
+  const signOut = useCallback(async (reason?: string) => {
+    try {
+      await api("/api/auth/logout", { method: "POST" });
+    } finally {
+      setSession(null);
+      setSelected(null);
+      if (reason !== undefined) setNotice(reason);
+    }
+  }, []);
+
+  // A different account in the wallet ends the session: nothing approved under it may carry over.
+  useEffect(
+    () =>
+      watchWallet(
+        (address) => {
+          setWallet((previous) => (address === null ? null : { address, chainId: previous?.chainId ?? 0 }));
+          if (session !== null && session !== undefined && address !== session.address) void signOut("The wallet's account changed, so you were signed out. Sign in again with the account you want to use.");
+        },
+        (chainId) => setWallet((previous) => (previous === null ? null : { ...previous, chainId })),
+      ),
+    [session, signOut],
+  );
+
+  const mismatch = session !== null && session !== undefined && wallet !== null && wallet.address !== session.address;
+
+  async function signIn() {
+    setBusy(true);
+    setNotice(null);
+    try {
+      const account = await connectWallet();
+      setWallet(account);
+      const issued = await api<SignInChallenge>("/api/auth/challenge", { method: "POST", body: { address: account.address, chainId: account.chainId } });
+      const signature = await signMessage(account, issued.message);
+      setSession(await api<Session>("/api/auth/verify", { method: "POST", body: { challenge: issued.challenge, signature } }));
+    } catch (error) {
+      setNotice(describeError(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const ready = health.status === "ready" ? health.value : undefined;
   return (
-    typeof record.environment === "string" &&
-    (record.mode === "simulated" || record.mode === "live") &&
-    typeof record.networkLabel === "string" &&
-    (record.paymentWrites === "enabled" || record.paymentWrites === "disabled")
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand__name">SettleBack</span>
+          <span className="brand__tagline">Recovery for paid agent jobs</span>
+        </div>
+        <div className="topbar__network" aria-label="Network">
+          {health.status === "loading" && <span className="badge">Checking server…</span>}
+          {health.status === "unavailable" && <span className="badge badge--attention">Server unavailable</span>}
+          {ready !== undefined && (
+            <>
+              <span className={ready.mode === "simulated" ? "badge badge--simulated" : "badge badge--live"}>{ready.mode === "simulated" ? "Simulation · no real funds" : "Live"}</span>
+              <span className="badge">{ready.networkLabel}</span>
+              <span className="badge">{ready.registry.status === "connected" ? `Registry ${short(ready.registry.address, 4)} · chain ${ready.registry.chainId}` : "No registry"}</span>
+              <span className={ready.paymentWrites === "enabled" ? "badge" : "badge badge--muted"}>Payment writes {ready.paymentWrites}</span>
+            </>
+          )}
+        </div>
+        <div className="topbar__account">
+          {session ? (
+            <>
+              <span className="account" title={session.address}>
+                {short(session.address, 4)}
+                {session.roles.includes("operator") ? " · operator" : ""}
+                {wallet !== null && ` · chain ${wallet.chainId}`}
+              </span>
+              <button type="button" className="button button--quiet" onClick={() => void signOut()}>
+                Sign out
+              </button>
+            </>
+          ) : (
+            <button type="button" className="button" onClick={() => void signIn()} disabled={busy || session === undefined || !hasWallet()}>
+              {busy ? "Waiting for wallet…" : "Sign in with wallet"}
+            </button>
+          )}
+        </div>
+      </header>
+
+      {notice !== null && (
+        <div className="notice" role="status">
+          <span>{notice}</span>
+          <button type="button" className="button button--quiet" onClick={() => setNotice(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+      {mismatch && (
+        <div className="notice notice--attention" role="alert">
+          The wallet is on {short(wallet.address, 4)}, but you signed in as {short(session.address, 4)}.{" "}
+          <button type="button" className="button button--quiet" onClick={() => void signOut()}>
+            Sign out
+          </button>
+        </div>
+      )}
+
+      {session === undefined && <p className="empty">Loading…</p>}
+      {session === null && <SignedOut walletAvailable={hasWallet()} />}
+      {session && ready !== undefined && (
+        <main className="layout">
+          <CaseList session={session} selected={selected} onSelect={setSelected} />
+          {selected === null ? (
+            <section className="workspace workspace--empty" aria-label="Case workspace">
+              <p>Select a case to see its payment, execution, and delivery records and what can be done next.</p>
+            </section>
+          ) : (
+            <CaseWorkspace key={selected} caseId={selected} session={session} wallet={mismatch ? null : wallet} health={ready} />
+          )}
+        </main>
+      )}
+    </div>
   );
 }
 
-export function App() {
-  const [state, setState] = useState<HealthState>({ status: "loading" });
-
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch("/api/health", { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const body: unknown = await response.json();
-        if (!isHealth(body)) throw new Error("Unexpected health response");
-        setState({ status: "ready", health: body });
-      })
-      .catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        setState({ status: "unavailable", reason: error instanceof Error ? error.message : String(error) });
-      });
-    return () => controller.abort();
-  }, []);
-
+function SignedOut({ walletAvailable }: { walletAvailable: boolean }) {
   return (
-    <main className="shell">
-      <header className="shell__header">
-        <h1>SettleBack</h1>
-        <p className="shell__tagline">Recovery for paid agent jobs.</p>
-      </header>
-      <section aria-live="polite" className="shell__status">
-        {state.status === "loading" && <p>Checking server…</p>}
-        {state.status === "unavailable" && (
-          <p className="status status--unavailable">Server unavailable: {state.reason}</p>
-        )}
-        {state.status === "ready" && (
-          <dl className="status">
-            <dt>Mode</dt>
-            <dd>
-              <span className={state.health.mode === "simulated" ? "badge badge--simulated" : "badge"}>
-                {state.health.mode === "simulated" ? "Simulation, no real funds" : "Live"}
-              </span>
-            </dd>
-            <dt>Network</dt>
-            <dd>
-              <span className="badge">{state.health.networkLabel}</span>
-            </dd>
-            <dt>Payment writes</dt>
-            <dd>{state.health.paymentWrites}</dd>
-          </dl>
-        )}
-      </section>
+    <main className="signed-out">
+      <h1>Recover a paid agent job</h1>
+      <p>
+        SettleBack reconciles the payment, execution, and delivery records of a paid job. It delivers a result that already exists, coordinates a separate repayment the seller
+        approves from its own wallet, or leaves the case explicitly unresolved. Model output never authorizes a transfer.
+      </p>
+      <p>Sign in with the wallet of the buyer, the seller, or an operator. Signing in proves you control the account; it authorizes no payment or transaction.</p>
+      {!walletAvailable && <p className="notice notice--attention">No browser wallet was found. Install one, such as MetaMask, and reload.</p>}
     </main>
   );
 }

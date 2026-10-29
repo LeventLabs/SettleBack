@@ -68,7 +68,34 @@ export interface ValidatedCart {
   grossLimitBaseUnits: string;
 }
 
-export type CartValidation = { ok: true; cart: ValidatedCart } | { ok: false; rejections: CartRejection[] };
+/** Each check the Payment Agent makes, in the order it makes them. */
+export const CART_CHECKS = [
+  { id: "cart-format", label: "The Cart Mandate parses, and its hash is recomputed from the contents received" },
+  { id: "merchant-signature", label: "The merchant JWT verifies against the pinned merchant key and the recomputed cart hash" },
+  { id: "merchant-identity", label: "The issuer and the merchant name are the pinned merchant" },
+  { id: "cart-expiry", label: "The cart has not expired" },
+  { id: "amount-rules", label: "The amounts follow the gateway's amount rules" },
+  { id: "order-binding", label: "The cart and payment request IDs are the ones recorded for this order" },
+  { id: "recipient-chain-token", label: "A payment option pays the intended seller on the intended chain and token" },
+  { id: "payee-allowlist", label: "The seller is on the buyer's payee allowlist" },
+  { id: "price", label: "The amount due equals the agreed price" },
+  { id: "pinned-rate", label: "The amount converts to whole token units at the pinned stablecoin rate" },
+  { id: "per-payment-cap", label: "Price plus the maximum fee fits the per-payment cap" },
+  { id: "daily-cap", label: "Price plus the maximum fee fits today's cap" },
+] as const;
+
+export type CartCheckId = (typeof CART_CHECKS)[number]["id"];
+
+/** One check's result. A check skipped because an earlier failure made it meaningless is "not-checked", never "passed". */
+export interface CartCheck {
+  id: CartCheckId;
+  label: string;
+  status: "passed" | "blocked" | "not-checked";
+  /** Why it was blocked, or null. */
+  reason: string | null;
+}
+
+export type CartValidation = { ok: true; cart: ValidatedCart; checks: CartCheck[] } | { ok: false; rejections: CartRejection[]; checks: CartCheck[] };
 
 export interface ValidateCartInput {
   /** The Cart Mandate exactly as received; it is untrusted. */
@@ -88,9 +115,21 @@ export interface ValidateCartInput {
 export function validateCartMandate(input: ValidateCartInput): CartValidation {
   const { intent, policy, merchant } = input;
   const rejections: CartRejection[] = [];
-  const reject = (code: CartRejectionCode, message: string): void => {
+  const results = new Map<CartCheckId, string[]>();
+  const reject = (check: CartCheckId, code: CartRejectionCode, message: string): void => {
     rejections.push({ code, message });
+    results.set(check, [...(results.get(check) ?? []), message]);
   };
+  // Marks a check as made; it passed unless it was rejected.
+  const made = (...checks: CartCheckId[]): void => {
+    for (const check of checks) if (!results.has(check)) results.set(check, []);
+  };
+  const report = (): CartCheck[] =>
+    CART_CHECKS.map(({ id, label }) => {
+      const reasons = results.get(id);
+      if (reasons === undefined) return { id, label, status: "not-checked", reason: null };
+      return reasons.length === 0 ? { id, label, status: "passed", reason: null } : { id, label, status: "blocked", reason: reasons.join("; ") };
+    });
 
   let mandate: ReturnType<typeof parseCartMandate>;
   let hash: string;
@@ -99,22 +138,26 @@ export function validateCartMandate(input: ValidateCartInput): CartValidation {
     hash = cartHash((input.cartMandate as { contents: unknown }).contents);
   } catch (error) {
     const message = error instanceof CartShapeError || error instanceof Error ? error.message : String(error);
-    return { ok: false, rejections: [{ code: "MALFORMED_CART", message }] };
+    reject("cart-format", "MALFORMED_CART", message);
+    return { ok: false, rejections, checks: report() };
   }
+  made("cart-format");
   const { contents } = mandate;
   const nowSeconds = Math.floor(input.now.getTime() / 1000);
 
   const jwt = verifyMerchantJwt(mandate.merchant_authorization, merchant.publicKey, hash, nowSeconds);
-  if (!jwt.ok) reject("MERCHANT_SIGNATURE", JWT_MESSAGES[jwt.reason]);
-  else if (jwt.claims.iss !== merchant.merchantName || jwt.claims.sub !== merchant.merchantName) reject("WRONG_MERCHANT", "the JWT issuer is not the pinned merchant");
-  if (contents.merchant_name !== merchant.merchantName) reject("WRONG_MERCHANT", "merchant_name is not the pinned merchant");
+  if (!jwt.ok) reject("merchant-signature", "MERCHANT_SIGNATURE", JWT_MESSAGES[jwt.reason]);
+  else if (jwt.claims.iss !== merchant.merchantName || jwt.claims.sub !== merchant.merchantName) reject("merchant-identity", "WRONG_MERCHANT", "the JWT issuer is not the pinned merchant");
+  if (contents.merchant_name !== merchant.merchantName) reject("merchant-identity", "WRONG_MERCHANT", "merchant_name is not the pinned merchant");
+  made("merchant-signature", "merchant-identity");
 
   const expiry = Date.parse(contents.cart_expiry);
-  if (!Number.isFinite(expiry) || expiry <= input.now.getTime()) reject("CART_EXPIRED", "cart_expiry has passed or is not a valid time");
-  for (const problem of cartAmountProblems(contents)) reject("INVALID_AMOUNTS", problem);
+  if (!Number.isFinite(expiry) || expiry <= input.now.getTime()) reject("cart-expiry", "CART_EXPIRED", "cart_expiry has passed or is not a valid time");
+  for (const problem of cartAmountProblems(contents)) reject("amount-rules", "INVALID_AMOUNTS", problem);
   if (contents.id !== intent.cartMandateId || contents.payment_request.details.id !== intent.paymentRequestId) {
-    reject("ID_MISMATCH", "the cart or payment request ID is not the one recorded for this attempt");
+    reject("order-binding", "ID_MISMATCH", "the cart or payment request ID is not the one recorded for this attempt");
   }
+  made("cart-expiry", "amount-rules", "order-binding");
 
   const options = contents.payment_request.method_data.flatMap((method, index) =>
     normalizeMethod(method.supported_methods) === normalizeMethod(X402_METHOD) &&
@@ -125,27 +168,33 @@ export function validateCartMandate(input: ValidateCartInput): CartValidation {
   );
   const option = options.find(({ method }) => method.data.pay_to.toLowerCase() === intent.payee.toLowerCase());
   if (option === undefined) {
-    reject("NO_MATCHING_OPTION", options.length === 0 ? "no payment option is on the intended chain and token" : "no payment option pays the intended seller");
-    return { ok: false, rejections };
+    reject("recipient-chain-token", "NO_MATCHING_OPTION", options.length === 0 ? "no payment option is on the intended chain and token" : "no payment option pays the intended seller");
+    return { ok: false, rejections, checks: report() };
   }
+  made("recipient-chain-token");
   const payee = option.method.data.pay_to.toLowerCase() as Address;
-  if (!policy.payeeAllowlist.some((allowed) => allowed.toLowerCase() === payee)) reject("PAYEE_NOT_ALLOWED", "the payee is not on the buyer's allowlist");
+  if (!policy.payeeAllowlist.some((allowed) => allowed.toLowerCase() === payee)) reject("payee-allowlist", "PAYEE_NOT_ALLOWED", "the payee is not on the buyer's allowlist");
+  made("payee-allowlist");
 
   const totalUsd = effectiveTotal(contents, option.index);
-  if (!sameUsd(totalUsd, intent.priceUsd)) reject("PRICE_MISMATCH", `the amount due is ${totalUsd} USD, not the agreed ${intent.priceUsd} USD`);
+  if (!sameUsd(totalUsd, intent.priceUsd)) reject("price", "PRICE_MISMATCH", `the amount due is ${totalUsd} USD, not the agreed ${intent.priceUsd} USD`);
+  made("price");
 
   const amount = tokenAmount(totalUsd, policy.usdRate, intent.tokenDecimals);
   if (amount === undefined) {
-    reject("RATE_UNSUPPORTED", "the amount due does not convert to whole token base units at the pinned rate");
-    return { ok: false, rejections };
+    reject("pinned-rate", "RATE_UNSUPPORTED", "the amount due does not convert to whole token base units at the pinned rate");
+    return { ok: false, rejections, checks: report() };
   }
+  made("pinned-rate");
   const gross = amount + BigInt(policy.maxFeeBaseUnits);
-  if (gross > BigInt(policy.perPaymentCapBaseUnits)) reject("OVER_PER_PAYMENT_CAP", "the gross amount exceeds the per-payment cap");
-  if (BigInt(policy.spentTodayBaseUnits) + gross > BigInt(policy.dailyCapBaseUnits)) reject("OVER_DAILY_CAP", "the gross amount would exceed today's cap");
+  if (gross > BigInt(policy.perPaymentCapBaseUnits)) reject("per-payment-cap", "OVER_PER_PAYMENT_CAP", "the gross amount exceeds the per-payment cap");
+  if (BigInt(policy.spentTodayBaseUnits) + gross > BigInt(policy.dailyCapBaseUnits)) reject("daily-cap", "OVER_DAILY_CAP", "the gross amount would exceed today's cap");
+  made("per-payment-cap", "daily-cap");
 
-  if (rejections.length > 0) return { ok: false, rejections };
+  if (rejections.length > 0) return { ok: false, rejections, checks: report() };
   return {
     ok: true,
+    checks: report(),
     cart: {
       cartMandateId: contents.id,
       paymentRequestId: contents.payment_request.details.id,

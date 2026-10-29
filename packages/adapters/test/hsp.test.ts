@@ -322,6 +322,27 @@ describe("Payment Agent checks before signing", () => {
     expect(result).toMatchObject({ ok: true, cart: { amountBaseUnits: "1000000", grossLimitBaseUnits: "1100000", payee: SELLER, methodIndex: 0 } });
   });
 
+  it("reports every check: passed when made, blocked with its reason, not checked when an earlier failure made it moot", () => {
+    const statuses = (overrides: Partial<ValidateCartInput>) => Object.fromEntries(validateCartMandate(validInput(overrides, merchant.publicKey)).checks.map((check) => [check.id, check.status]));
+    const base = validInput({ cartMandate: signed() }, merchant.publicKey);
+    expect(new Set(Object.values(statuses({ cartMandate: signed() })))).toEqual(new Set(["passed"]));
+    expect(Object.keys(statuses({ cartMandate: signed() }))).toHaveLength(12);
+
+    const mandate = signed();
+    const altered = { ...mandate, contents: { ...mandate.contents, payment_request: { ...mandate.contents.payment_request, details: { ...mandate.contents.payment_request.details, total: { label: "Total", amount: { currency: "USD", value: "0.50" } } } } } };
+    expect(statuses({ cartMandate: altered })).toMatchObject({ "merchant-signature": "blocked", price: "blocked", "order-binding": "passed", "daily-cap": "passed" });
+
+    expect(new Set(Object.entries(statuses({ cartMandate: {} })).filter(([id]) => id !== "cart-format").map(([, status]) => status))).toEqual(new Set(["not-checked"]));
+    expect(statuses({ cartMandate: {} })["cart-format"]).toBe("blocked");
+
+    const otherChain = statuses({ cartMandate: signed(), intent: { ...base.intent, chainId: 177 } });
+    expect(otherChain).toMatchObject({ "merchant-signature": "passed", "recipient-chain-token": "blocked", "payee-allowlist": "not-checked", price: "not-checked", "daily-cap": "not-checked" });
+
+    const capped = validateCartMandate(validInput({ cartMandate: signed(), policy: { ...base.policy, perPaymentCapBaseUnits: "1000" } }, merchant.publicKey));
+    expect(capped.checks.find((check) => check.id === "per-payment-cap")).toMatchObject({ status: "blocked", reason: "the gross amount exceeds the per-payment cap" });
+    expect(capped.checks.find((check) => check.id === "daily-cap")?.status).toBe("passed");
+  });
+
   it("rejects a cart altered after the merchant signed it", () => {
     const mandate = signed();
     const altered = { ...mandate, contents: { ...mandate.contents, payment_request: { ...mandate.contents.payment_request, details: { ...mandate.contents.payment_request.details, total: { label: "Total", amount: { currency: "USD", value: "0.50" } } } } } };

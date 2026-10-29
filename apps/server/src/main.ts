@@ -15,10 +15,13 @@ const config = loadConfig();
 const db = openDatabase({ path: config.databasePath, environment: config.environment });
 // A configured but unreachable or mismatched registry stops startup instead of running without it.
 const registry = await connectRegistry(config.registry);
-const demo = config.demo === undefined ? undefined : await startDemoWorld(db, { parties: config.demo, tickMs: DEMO_GATEWAY_TICK_MS });
+// The app's logger exists only after buildApp, so the demo world reports through this indirection.
+let reportDemoError = (error: unknown): void => console.error(error);
+const demo = config.demo === undefined ? undefined : await startDemoWorld(db, { parties: config.demo, tickMs: DEMO_GATEWAY_TICK_MS, onError: (error) => reportDemoError(error) });
 const apiKey = config.assessment.apiKey;
 const provider = apiKey === undefined ? undefined : new ClaudeAssessmentProvider({ ...config.assessment, apiKey: apiKey.reveal() });
-const app = buildApp(config, { db, registry, provider, terms: demo?.terms, lookup: demo?.lookup, payments: demo?.payments });
+const app = buildApp(config, { db, registry, provider, terms: demo?.terms, lookup: demo?.lookup, payments: demo?.payments, purchases: demo?.purchases });
+reportDemoError = (error) => app.log.error(error, "demo purchase step failed");
 if (demo !== undefined) app.log.info({ cases: demo.cases, buyer: config.demo?.buyer, seller: config.demo?.seller }, "demo cases seeded (simulated, in memory)");
 // Outside the demo no payment rail is configured yet, so the passes retry pending registry outcomes only.
 const reconciler = startReconciler({

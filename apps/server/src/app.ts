@@ -6,6 +6,8 @@ import { SessionAuthority } from "./auth/sessions.ts";
 import type { ServerConfig } from "./config.ts";
 import { registerAuthRoutes } from "./http/auth-routes.ts";
 import { registerCaseRoutes } from "./http/case-routes.ts";
+import { registerPurchaseRoutes } from "./http/purchase-routes.ts";
+import type { DemoPurchases } from "./demo/purchases.ts";
 import { handleError } from "./http/errors.ts";
 import { RequestGuard } from "./http/guard.ts";
 import type { AssessmentProvider } from "./recovery/provider.ts";
@@ -22,6 +24,8 @@ export interface AppDependencies {
   provider?: AssessmentProvider | undefined;
   /** The rail and signer repayments are paid with; used only when payment writes are enabled. */
   payments?: RepaymentPayments | undefined;
+  /** Jobs bought through the workspace in the local demo; used only when payment writes are enabled. */
+  purchases?: DemoPurchases | undefined;
   clock?: () => Date;
   /** Authenticates sign-in challenges; a fresh random key per process unless given. */
   signInKey?: Buffer;
@@ -96,6 +100,9 @@ export function buildApp(config: ServerConfig, dependencies: AppDependencies): F
     // Payment writes stay off unless the configuration enables them, whatever rail is connected.
     payments: config.paymentWritesEnabled ? dependencies.payments : undefined,
   });
+  if (config.paymentWritesEnabled && dependencies.purchases !== undefined) {
+    registerPurchaseRoutes(app, { db: dependencies.db, guard, clock, purchases: dependencies.purchases });
+  }
 
   return app;
 }

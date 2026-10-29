@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, describeError } from "./api.ts";
+import { BuyJob } from "./BuyJob.tsx";
 import { CaseList } from "./CaseList.tsx";
 import { CaseWorkspace } from "./CaseWorkspace.tsx";
 import { explorerLink, networkName, short } from "./format.ts";
@@ -26,6 +27,7 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
+  const [buying, setBuying] = useState(false);
 
   useEffect(() => {
     api<Health>("/api/health").then(
@@ -45,6 +47,7 @@ export function App() {
     } finally {
       setSession(null);
       setSelected(null);
+      setBuying(false);
       if (reason !== undefined) setNotice(reason);
     }
   }, []);
@@ -93,7 +96,9 @@ export function App() {
           {health.status === "unavailable" && <span className="badge badge--attention">Server unavailable</span>}
           {ready !== undefined && (
             <>
-              <span className={ready.mode === "simulated" ? "badge badge--simulated" : "badge badge--live"}>{ready.mode === "simulated" ? "Simulation · no real funds" : "Live"}</span>
+              <span className={ready.mode === "simulated" ? "badge badge--simulated" : "badge badge--live"}>
+                {ready.mode !== "simulated" ? "Live" : ready.registry.status === "connected" && ready.registry.provenance === "LIVE" ? "Payment funds simulated · registry uses testnet HSK" : "Simulation · no real funds"}
+              </span>
               <span className="badge">{ready.networkLabel}</span>
               {ready.registry.status === "connected" ? <RegistryBadge chainId={ready.registry.chainId} address={ready.registry.address} live={ready.registry.provenance === "LIVE"} /> : <span className="badge">No registry</span>}
               <span className={ready.paymentWrites === "enabled" ? "badge" : "badge badge--muted"}>Payment writes {ready.paymentWrites}</span>
@@ -141,10 +146,29 @@ export function App() {
       {session === null && <SignedOut walletAvailable={hasWallet()} />}
       {session && ready !== undefined && (
         <main className="layout">
-          <CaseList session={session} selected={selected} onSelect={setSelected} />
-          {selected === null ? (
+          <CaseList
+            session={session}
+            selected={selected}
+            buying={buying}
+            onBuy={() => setBuying(true)}
+            onSelect={(caseId) => {
+              setBuying(false);
+              setSelected(caseId);
+            }}
+          />
+          {buying ? (
+            <BuyJob
+              session={session}
+              wallet={mismatch ? null : wallet}
+              health={ready}
+              onViewCase={(caseId) => {
+                setBuying(false);
+                setSelected(caseId);
+              }}
+            />
+          ) : selected === null ? (
             <section className="workspace workspace--empty" aria-label="Case workspace">
-              <p>Select a case to see its payment, execution, and delivery records and what can be done next.</p>
+              <p>Select a case to see its payment, execution, and delivery records and what can be done next, or buy a new job.</p>
             </section>
           ) : (
             <CaseWorkspace key={selected} caseId={selected} session={session} wallet={mismatch ? null : wallet} health={ready} />

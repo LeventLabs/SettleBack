@@ -152,3 +152,40 @@ export interface CaseView {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface PurchaseCheck {
+  id: string;
+  label: string;
+  status: "passed" | "blocked" | "not-checked";
+  reason: string | null;
+}
+
+export type PurchaseEventKind = "payment-verified" | "payment-unknown" | "job-started" | "delivered" | "error-response" | "deadline-passed" | "case-opened" | "records-updated";
+
+/** A job bought from the workspace, as the server reports it; the stage follows server state only. */
+export interface PurchaseView {
+  operationId: string;
+  scenario: { id: string; label: string };
+  createdAt: string;
+  stage: "review" | "authorize" | "payment" | "job";
+  job: { serviceId: string; seller: string; priceUsd: string; amountBaseUnits: string; chainId: number; token: string; policyId: string };
+  quote: {
+    merchantName: string;
+    cartMandateId: string;
+    paymentRequestId: string;
+    cartSha256: string;
+    expiresAt: string;
+    maxFeeBaseUnits: string;
+    grossLimitBaseUnits: string | null;
+    payeeAllowlist: string[];
+    perPaymentCapBaseUnits: string;
+    dailyCapBaseUnits: string;
+  } | null;
+  checks: PurchaseCheck[];
+  payment: PaymentView | null;
+  signatureSubmittedAt: string | null;
+  run: { startedAt: string; deadlineAt: string; response: { status: number; at: string } | null } | null;
+  events: { at: string; kind: PurchaseEventKind }[];
+  caseId: string | null;
+  done: boolean;
+}

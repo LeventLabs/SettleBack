@@ -94,7 +94,7 @@ function CaseHeader({ data, health, session }: { data: CaseView; health: Health;
         <div>
           <dt>Inputs</dt>
           <dd>
-            {health.mode === "simulated" ? "Synthetic fixture · simulated gateway and payment chain" : "Live records"}
+            {health.mode === "simulated" ? "Synthetic demo job · simulated gateway and payment chain" : "Live records"}
             {health.mode === "simulated" && health.registry.status === "connected" && health.registry.provenance === "LIVE" ? ` · registry live on ${networkName(health.registry.chainId)}` : ""}
           </dd>
         </div>

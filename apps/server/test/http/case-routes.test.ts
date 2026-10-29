@@ -4,11 +4,12 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { FastifyInstance, LightMyRequestResponse } from "fastify";
 import { HttpRequestError } from "viem";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
-import type { RegistryGateway } from "@settleback/adapters";
+import { createSimulatedAdapters, signSimulatedPayload, type RegistryGateway } from "@settleback/adapters";
 import type { Address } from "@settleback/domain";
 import { buildApp, type AppDependencies } from "../../src/app.ts";
 import { loadConfig } from "../../src/config.ts";
 import { getRecoveryActionForCase } from "../../src/db/actions.ts";
+import { reconcilePending } from "../../src/payments/reconciler.ts";
 import { memoryDatabase } from "../db/helpers.ts";
 import { startLocalChain, type LocalChain } from "../registry/anvil.ts";
 import { TERMS, registerFixturePolicies, setupFixtureCase, type FixtureCaseSetup } from "../recovery/helpers.ts";
@@ -170,6 +171,48 @@ describe("per-case repayment approval over HTTP", () => {
   });
 });
 
+describe("per-case repayment over HTTP", () => {
+  it("lets only the seller pay the reserved repayment, once", async () => {
+    const sim = createSimulatedAdapters({ environment: "local", webhookSecret: "app-secret", start: new Date().toISOString() });
+    const payments = {
+      rail: sim.rail,
+      signer: { provenance: "SIMULATED" as const, sign: async (payload: Parameters<typeof signSimulatedPayload>[0]) => signSimulatedPayload(payload) },
+      merchant: { merchantName: "SettleBack Demo Seller", publicKey: sim.merchantPublicKey },
+      deploymentId: "local-registry",
+      coin: "USDC",
+      maxFeeBaseUnits: "100000",
+    };
+    const setup = await setupFixtureCase(db, "refundable-failure-per-case", parties);
+    const app = server(setup, { payments });
+    const [asBuyer, asSeller, asStranger] = await Promise.all([signIn(app, buyer), signIn(app, seller), signIn(app, stranger)]);
+    const url = `/api/cases/${setup.caseId}/recovery/repay`;
+    const prepared = (await call(app, asSeller, "POST", `/api/cases/${setup.caseId}/recovery/prepare`)).json();
+    const early = await call(app, asSeller, "POST", url);
+    expect([early.statusCode, errorCode(early)]).toEqual([409, "WRONG_ACTION_STATE"]);
+    const bySeller = await chain.sendAs(parties.seller as Address, prepared.sellerCall);
+    await chain.mined(bySeller);
+    expect((await call(app, asSeller, "POST", `/api/cases/${setup.caseId}/recovery/approval-tx`, { payload: { txHash: bySeller } })).json().status).toBe("CONFIRMED");
+
+    expect(errorCode(await call(app, asBuyer, "POST", url))).toBe("ROLE_FORBIDDEN");
+    expect(errorCode(await call(app, asStranger, "POST", url))).toBe("NOT_FOUND");
+    const unwired = server(setup);
+    const noRail = await call(unwired, await signIn(unwired, seller), "POST", url);
+    expect([noRail.statusCode, errorCode(noRail)]).toEqual([503, "DEPENDENCY_UNAVAILABLE"]);
+
+    const paid = await call(app, asSeller, "POST", url);
+    expect(paid.statusCode, paid.body).toBe(200);
+    expect(paid.json()).toMatchObject({ status: "SUBMITTED", action: { state: "EXECUTION_REQUESTED" }, payment: { purpose: "REPAYMENT", state: "SIGNING_REQUESTED", payer: parties.seller, payee: parties.buyer } });
+    const again = await call(app, asSeller, "POST", url);
+    expect(again.json()).toMatchObject({ status: "ALREADY_REQUESTED", payment: { id: paid.json().payment.id } });
+
+    for (let tick = 0; tick < 6; tick += 1) sim.gateway.tick();
+    await reconcilePending({ db, rail: sim.rail, registry: chain.registry, now: () => new Date(), requiredLevel: "FINAL" });
+    const view = (await call(app, asBuyer, "GET", `/api/cases/${setup.caseId}`)).json();
+    expect(view).toMatchObject({ status: "REPAID", recoveryAction: { state: "COMPLETED" }, repayment: { state: "VERIFIED", payee: parties.buyer } });
+    expect(view.repayment.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+});
+
 describe("authorization", () => {
   async function preparedRetrieval(): Promise<{ setup: FixtureCaseSetup; app: FastifyInstance }> {
     const setup = await setupFixtureCase(db, "lost-response", parties);
@@ -187,6 +230,7 @@ describe("authorization", () => {
       { method: "POST", url: `/api/cases/${setup.caseId}/assess` },
       { method: "POST", url: `/api/cases/${setup.caseId}/recovery/prepare` },
       { method: "POST", url: `/api/cases/${setup.caseId}/recovery/approval-tx`, payload: { txHash: `0x${"1".repeat(64)}` } },
+      { method: "POST", url: `/api/cases/${setup.caseId}/recovery/repay` },
       { method: "GET", url: `/api/operations/${setup.operationId}/result` },
       { method: "POST", url: `/api/operations/${setup.operationId}/result/ack`, payload: { artifactSha256: "a".repeat(64) } },
     ];
@@ -223,6 +267,8 @@ describe("authorization", () => {
       [asBuyer, "POST", `/api/cases/${setup.caseId}/recovery/prepare`],
       [asBuyer, "POST", `/api/cases/${setup.caseId}/recovery/approval-tx`],
       [asOperator, "POST", `/api/cases/${setup.caseId}/recovery/approval-tx`],
+      [asOperator, "POST", `/api/cases/${setup.caseId}/recovery/repay`],
+      [asBuyer, "POST", `/api/cases/${setup.caseId}/recovery/repay`],
       [asOperator, "GET", `/api/operations/${setup.operationId}/result`],
       [asOperator, "POST", `/api/operations/${setup.operationId}/result/ack`],
     ];

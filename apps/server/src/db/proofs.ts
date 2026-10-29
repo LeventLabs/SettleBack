@@ -20,26 +20,29 @@ export interface ProofAllocationInput {
  * anywhere in this deployment and chain, or a second original for the same operation, is refused.
  */
 export function allocateProof(db: DatabaseSync, input: ProofAllocationInput): void {
+  immediateTransaction(db, () => insertProofAllocation(db, input));
+}
+
+/** As allocateProof, for callers that already hold a transaction. */
+export function insertProofAllocation(db: DatabaseSync, input: ProofAllocationInput): void {
   const proofId = input.proofId.toLowerCase();
   try {
-    immediateTransaction(db, () => {
-      db.prepare(
-        `INSERT INTO proof_allocations (deployment_id, chain_id, proof_id, proof_type, operation_id, action_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(input.deploymentId, input.chainId, proofId, input.proofType, input.operationId, input.actionId, input.now);
-      appendEvent(db, {
-        entityType: input.actionId === null ? "operation" : "recovery_action",
-        entityId: input.actionId ?? input.operationId,
-        eventType: "PROOF_ALLOCATED",
-        priorRevision: null,
-        newRevision: null,
-        actor: input.actor,
-        payloadSha256: sha256Hex(proofId),
-        createdAt: input.now,
-      });
-    });
+    db.prepare(
+      `INSERT INTO proof_allocations (deployment_id, chain_id, proof_id, proof_type, operation_id, action_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(input.deploymentId, input.chainId, proofId, input.proofType, input.operationId, input.actionId, input.now);
   } catch (error) {
     if (isUniqueViolation(error)) throw new ProofAlreadyAllocatedError(proofId);
     throw error;
   }
+  appendEvent(db, {
+    entityType: input.actionId === null ? "operation" : "recovery_action",
+    entityId: input.actionId ?? input.operationId,
+    eventType: "PROOF_ALLOCATED",
+    priorRevision: null,
+    newRevision: null,
+    actor: input.actor,
+    payloadSha256: sha256Hex(proofId),
+    createdAt: input.now,
+  });
 }

@@ -1,6 +1,13 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from "fastify";
 import { BaseError } from "viem";
-import { RegistryConfigurationError, RegistryOutcomeUnknownError, RegistryRevertError } from "@settleback/adapters";
+import {
+  RailRejectedError,
+  RailTimeoutError,
+  RailUnavailableError,
+  RegistryConfigurationError,
+  RegistryOutcomeUnknownError,
+  RegistryRevertError,
+} from "@settleback/adapters";
 import { StoreError } from "../db/errors.ts";
 
 /** HTTP status for each stable error code a route may return. A code missing here is an internal error. */
@@ -20,6 +27,7 @@ const STATUS: Readonly<Record<string, number>> = {
   OPERATION_NOT_FOUND: 404,
   CASE_NOT_FOUND: 404,
   ACTION_NOT_FOUND: 404,
+  ATTEMPT_NOT_FOUND: 404,
   IDEMPOTENCY_CONFLICT: 409,
   CASE_NOT_READY: 409,
   ASSESSMENT_IN_PROGRESS: 409,
@@ -33,9 +41,15 @@ const STATUS: Readonly<Record<string, number>> = {
   NOT_EXECUTABLE: 409,
   ARTIFACT_MISMATCH: 409,
   ACK_DIGEST_MISMATCH: 409,
+  CART_REJECTED: 409,
+  CART_MISMATCH: 409,
+  PERMIT_CONSUMED: 409,
+  ATTEMPT_NOT_EXECUTABLE: 409,
+  PROOF_ALREADY_ALLOCATED: 409,
   REGISTRY_REQUIRED: 503,
   WRONG_REGISTRY: 503,
   DEPENDENCY_UNAVAILABLE: 503,
+  MANDATE_FORMAT_UNAVAILABLE: 503,
   // Stored records that fail their own digests: refused loudly, never served.
   ACTION_INTEGRITY: 500,
   EVIDENCE_INTEGRITY: 500,
@@ -67,6 +81,15 @@ export function handleError(error: FastifyError | Error, request: FastifyRequest
     request.log.warn(error, "registry outcome unknown");
     reply.code(503);
     return { error: { code: "REGISTRY_OUTCOME_UNKNOWN", message: `Registry transaction ${error.txHash} was sent but not yet confirmed; retry to read its outcome.` } };
+  }
+  if (error instanceof RailRejectedError) {
+    reply.code(409);
+    return { error: { code: "PAYMENT_REJECTED", message: `The payment gateway refused the request (${error.code}).` } };
+  }
+  if (error instanceof RailUnavailableError || error instanceof RailTimeoutError) {
+    request.log.warn(error, "payment gateway unavailable");
+    reply.code(503);
+    return { error: { code: "DEPENDENCY_UNAVAILABLE", message: "The payment gateway could not be reached; retry the request." } };
   }
   if (error instanceof RegistryConfigurationError || error instanceof BaseError) {
     request.log.error(error, "registry unavailable");

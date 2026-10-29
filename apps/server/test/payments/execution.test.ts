@@ -243,7 +243,7 @@ describe("payment execution", () => {
     expect(tools.calls).toEqual({ sign: 1, submit: 1 });
   });
 
-  it("refuses before consuming the permit when the payer, cart, state, provenance, or precondition is wrong", async () => {
+  it("refuses before consuming the permit when the payer, cart, state, provenance, or claim check is wrong", async () => {
     const { quote, cart } = await quoted();
     const tools = counted();
     const cases: [string, Promise<unknown>][] = [
@@ -256,7 +256,7 @@ describe("payment execution", () => {
       [
         "ATTEMPT_NOT_EXECUTABLE",
         execute(quote.attemptId, cart, tools, {
-          precondition: () => {
+          onClaim: () => {
             throw new ExecutionRefusedError("ATTEMPT_NOT_EXECUTABLE", "the reservation is no longer executable");
           },
         }),

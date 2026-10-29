@@ -127,6 +127,33 @@ export function deliveryAckSha256(ack: DeliveryAcknowledgement): string {
   return sha256Hex(canonicalJson(ack as unknown as Parameters<typeof canonicalJson>[0]));
 }
 
+export const REPAYMENT_EVIDENCE_SCHEMA = "settleback.repayment-evidence.v1";
+
+/**
+ * What the application verified about a repayment: the transfer terms, the cart and mandate it
+ * was made under, and the gateway flow and on-chain transaction that settled it. Its digest is the
+ * evidence commitment the registry records with the repayment outcome.
+ */
+export interface RepaymentEvidence {
+  schema: typeof REPAYMENT_EVIDENCE_SCHEMA;
+  caseKey: string;
+  actionSha256: string;
+  attemptId: string;
+  payer: Address;
+  payee: Address;
+  chainId: number;
+  token: Address;
+  amountBaseUnits: string;
+  cartSha256: string;
+  paymentMandateSha256: string;
+  flowId: string;
+  txHash: string;
+}
+
+export function repaymentEvidenceSha256(evidence: RepaymentEvidence): string {
+  return sha256Hex(canonicalJson(evidence as unknown as Parameters<typeof canonicalJson>[0]));
+}
+
 export interface StandingPolicyView {
   status: "ACTIVE" | "PAUSED" | "REVOKED" | "REPLACED";
   seller: Address;

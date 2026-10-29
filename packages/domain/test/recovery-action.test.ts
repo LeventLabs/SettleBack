@@ -5,14 +5,17 @@ import {
   deliveryAckSha256,
   deriveEligibility,
   eligibilityRulesSha256,
+  REPAYMENT_EVIDENCE_SCHEMA,
   proposalSha256,
   registryCaseKey,
+  repaymentEvidenceSha256,
   repaymentTransfer,
   standingPolicyGaps,
   type BaselineResult,
   type DeliveryAcknowledgement,
   type PolicyFitInput,
   type RecoveryProposal,
+  type RepaymentEvidence,
 } from "../src/index.ts";
 import { sha256Hex } from "../src/hash.ts";
 
@@ -164,5 +167,45 @@ describe("delivery acknowledgement", () => {
       { acknowledgedAt: "2026-10-30T10:00:01.000Z" },
     ];
     for (const variant of variants) expect(deliveryAckSha256({ ...ack, ...variant }), JSON.stringify(variant)).not.toBe(digest);
+  });
+});
+
+describe("repayment evidence", () => {
+  const evidence: RepaymentEvidence = {
+    schema: REPAYMENT_EVIDENCE_SCHEMA,
+    caseKey: `0x${"1".repeat(64)}`,
+    actionSha256: "2".repeat(64),
+    attemptId: "attempt-1",
+    payer: SELLER,
+    payee: BUYER,
+    chainId: 133,
+    token: TOKEN,
+    amountBaseUnits: "1000000",
+    cartSha256: "3".repeat(64),
+    paymentMandateSha256: "4".repeat(64),
+    flowId: "flow-1",
+    txHash: `0x${"5".repeat(64)}`,
+  };
+
+  it("commits to every verified fact, whatever the key order", () => {
+    const digest = repaymentEvidenceSha256(evidence);
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+    const reordered = Object.fromEntries(Object.entries(evidence).reverse()) as unknown as RepaymentEvidence;
+    expect(repaymentEvidenceSha256(reordered)).toBe(digest);
+    const variants: Partial<RepaymentEvidence>[] = [
+      { caseKey: `0x${"6".repeat(64)}` },
+      { actionSha256: "6".repeat(64) },
+      { attemptId: "attempt-2" },
+      { payer: BUYER },
+      { payee: SELLER },
+      { chainId: 177 },
+      { token: SELLER },
+      { amountBaseUnits: "999999" },
+      { cartSha256: "6".repeat(64) },
+      { paymentMandateSha256: "6".repeat(64) },
+      { flowId: "flow-2" },
+      { txHash: `0x${"6".repeat(64)}` },
+    ];
+    for (const variant of variants) expect(repaymentEvidenceSha256({ ...evidence, ...variant }), JSON.stringify(variant)).not.toBe(digest);
   });
 });

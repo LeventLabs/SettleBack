@@ -4,6 +4,7 @@ import type { AssessmentRecord } from "../db/assessments.ts";
 import type { CaseRecord } from "../db/cases.ts";
 import type { EvidenceRecord } from "../db/evidence.ts";
 import type { OperationRecord } from "../db/operations.ts";
+import type { PaymentAttemptRecord } from "../db/payments.ts";
 
 /** How the signed-in account relates to an operation. Only these grant access; nothing in a request does. */
 export type Relation = "buyer" | "seller" | "operator";
@@ -41,6 +42,7 @@ export function caseView(
   action: RecoveryActionRecord | undefined,
   ack: DeliveryAckRecord | undefined,
   assessments: readonly AssessmentRecord[],
+  repayment: PaymentAttemptRecord | undefined,
 ) {
   const internals = seesInternals(relations);
   return {
@@ -65,6 +67,7 @@ export function caseView(
       })),
     },
     recoveryAction: action === undefined ? null : actionView(action),
+    repayment: repayment === undefined ? null : attemptView(repayment),
     delivery: ack === undefined ? null : { artifactSha256: ack.artifactSha256, acknowledgedAt: ack.acknowledgedAt },
     ...(internals ? { assessments: assessments.map(assessmentView) } : {}),
     openedBy: caseRecord.openedBy,
@@ -91,6 +94,24 @@ export function actionView(action: RecoveryActionRecord) {
     proposal: action.proposal,
     createdAt: action.createdAt,
     updatedAt: action.updatedAt,
+  };
+}
+
+/** A payment attempt's state and references; the mandate itself is not exposed. */
+export function attemptView(attempt: PaymentAttemptRecord) {
+  return {
+    id: attempt.id,
+    purpose: attempt.purpose,
+    state: attempt.state,
+    payer: attempt.payer,
+    payee: attempt.payee,
+    chainId: attempt.chainId,
+    token: attempt.token,
+    amountBaseUnits: attempt.amountBaseUnits,
+    paymentRequestId: attempt.paymentRequestId,
+    flowId: attempt.flowId,
+    txHash: attempt.txHash,
+    updatedAt: attempt.updatedAt,
   };
 }
 

@@ -40,10 +40,11 @@ export interface ClaimExecutionInput {
   provenances: readonly Provenance[];
   now: string;
   /**
-   * Further checks run inside the claiming transaction, after the attempt checks and before the
-   * permit is consumed; a throw leaves the permit unused. A repayment rechecks its reservation here.
+   * Runs inside the claiming transaction, after the attempt checks and before the permit is
+   * consumed. It may refuse, which leaves the permit unused, or record what the claim means for its
+   * caller atomically with it: a repayment rechecks its reservation and moves its action here.
    */
-  precondition?: (db: DatabaseSync, attempt: PaymentAttemptRecord) => void;
+  onClaim?: (db: DatabaseSync, attempt: PaymentAttemptRecord) => void;
 }
 
 export interface ExecutionClaim {
@@ -78,7 +79,7 @@ export function claimExecution(db: DatabaseSync, input: ClaimExecutionInput): Ex
     if (attempt.state !== "PREPARED") throw new ExecutionRefusedError("ATTEMPT_NOT_EXECUTABLE", `Payment attempt ${attempt.id} is ${attempt.state}; only a prepared attempt can be executed.`);
     const mismatches = cartMismatches(attempt, input.cart);
     if (mismatches.length > 0) throw new ExecutionRefusedError("CART_MISMATCH", `The cart does not match payment attempt ${attempt.id}: ${mismatches.join(", ")}.`);
-    input.precondition?.(db, attempt);
+    input.onClaim?.(db, attempt);
 
     const payload = mandateFor(input.cart, attempt, input.provenances);
     const paymentMandateSha256 = sha256Hex(canonicalJson(payload as unknown as CanonicalValue));

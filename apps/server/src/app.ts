@@ -9,6 +9,7 @@ import { registerCaseRoutes } from "./http/case-routes.ts";
 import { handleError } from "./http/errors.ts";
 import { RequestGuard } from "./http/guard.ts";
 import type { AssessmentProvider } from "./recovery/provider.ts";
+import type { RepaymentPayments } from "./recovery/repayment.ts";
 import type { ResultLookup } from "./recovery/retrieval.ts";
 
 export interface AppDependencies {
@@ -19,6 +20,8 @@ export interface AppDependencies {
   /** The job service and artifact store; without them nothing is assessed against them or delivered. */
   lookup?: ResultLookup | undefined;
   provider?: AssessmentProvider | undefined;
+  /** The rail and signer repayments are paid with; without them no repayment is paid. */
+  payments?: RepaymentPayments | undefined;
   clock?: () => Date;
   /** Authenticates sign-in challenges; a fresh random key per process unless given. */
   signInKey?: Buffer;
@@ -90,6 +93,7 @@ export function buildApp(config: ServerConfig, dependencies: AppDependencies): F
     lookup: dependencies.lookup,
     provider: dependencies.provider,
     assessmentTimeoutMs: config.assessment.timeoutMs,
+    payments: dependencies.payments,
   });
 
   return app;

@@ -13,9 +13,10 @@ import { getOriginalPayment } from "../db/payments.ts";
 import { confirmRepaymentReservation, prepareRecovery } from "../recovery/actions.ts";
 import { assessCase } from "../recovery/assessment.ts";
 import type { AssessmentProvider } from "../recovery/provider.ts";
+import { liveAttempt, requestRepayment, type RepaymentPayments } from "../recovery/repayment.ts";
 import { acknowledgeDelivery, retrieveResult, type ResultLookup } from "../recovery/retrieval.ts";
 import type { RequestGuard } from "./guard.ts";
-import { actionView, assessmentView, caseView, operationView, type Relation } from "./views.ts";
+import { actionView, assessmentView, attemptView, caseView, operationView, type Relation } from "./views.ts";
 
 export interface CaseRouteDependencies {
   db: DatabaseSync;
@@ -29,6 +30,8 @@ export interface CaseRouteDependencies {
   /** Without one, an assessment request is recorded as failed, never skipped. */
   provider: AssessmentProvider | undefined;
   assessmentTimeoutMs: number;
+  /** The rail and signer repayments are paid with. Without them no repayment is paid. */
+  payments: RepaymentPayments | undefined;
 }
 
 const ID_PARAMS = {
@@ -72,7 +75,9 @@ export function registerCaseRoutes(app: FastifyInstance, deps: CaseRouteDependen
     return readTransaction(db, () => {
       const { operation, relations } = scopeCase(db, session, id);
       const { case: caseRecord, items } = readCaseEvidence(db, id);
-      return caseView(caseRecord, relations, items, getRecoveryActionForCase(db, id), getDeliveryAck(db, operation.id), listAssessments(db, id));
+      const action = getRecoveryActionForCase(db, id);
+      const repayment = action?.action === "REPAY" ? liveAttempt(db, action) : undefined;
+      return caseView(caseRecord, relations, items, action, getDeliveryAck(db, operation.id), listAssessments(db, id), repayment);
     });
   });
 
@@ -134,6 +139,22 @@ export function registerCaseRoutes(app: FastifyInstance, deps: CaseRouteDependen
         : outcome;
     },
   );
+
+  // Pays the reserved per-case repayment once; a repeated request answers with the repayment under way.
+  app.post("/api/cases/:id/recovery/repay", { schema: { params: ID_PARAMS } }, async (request) => {
+    const session = guard.session(request, { wallet: true });
+    const { id } = request.params as { id: string };
+    const { relations } = readTransaction(db, () => scopeCase(db, session, id));
+    requireRelation(relations, ["seller"], "Only the operation's seller pays its repayment.");
+    if (deps.payments === undefined) throw new RecoveryRefusedError("DEPENDENCY_UNAVAILABLE", "No payment rail is connected; repayments cannot be paid.");
+    const outcome = await requestRepayment(db, { caseId: id, requestedBy: session.address, registry: deps.registry, payments: deps.payments, now });
+    return {
+      status: outcome.status,
+      ...(outcome.status === "OUTCOME_UNKNOWN" ? { reason: outcome.reason } : {}),
+      action: actionView(outcome.action),
+      payment: outcome.attempt === undefined ? null : attemptView(outcome.attempt),
+    };
+  });
 
   // A GET because the buyer reads the result, but it releases a reserved retrieval, so it needs the
   // wallet header like a write; a cross-site page cannot send that header without a preflight.

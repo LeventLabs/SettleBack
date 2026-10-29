@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { PaymentRail, RegistryGateway } from "@settleback/adapters";
 import { readTransaction } from "../db/database.ts";
+import { completeRepayment } from "../recovery/repayment.ts";
 import { recordRetrievalOutcome, type OutcomeRecording } from "../recovery/retrieval.ts";
 import { RECONCILABLE, reconcileAttempt, type Reconciliation } from "./reconcile.ts";
 
@@ -22,9 +23,10 @@ export interface ReconcileRun {
 
 /**
  * One pass over everything that waits on the outside world: payment attempts whose permit was
- * consumed, and acknowledged retrievals whose registry outcome is not recorded yet. Each item is
- * observed or retried on its own; one failure does not stop the others. Nothing here starts a new
- * payment, signs, or submits.
+ * consumed, repayments whose transfer or registry record is not final yet, and acknowledged
+ * retrievals whose registry outcome is not recorded yet. Attempts are observed first, so a
+ * repayment settled in this pass is completed in it too. Each item is observed or retried on its
+ * own; one failure does not stop the others. Nothing here starts a new payment, signs, or submits.
  */
 export async function reconcilePending(input: ReconcileRunInput): Promise<ReconcileRun> {
   const { db } = input;
@@ -54,13 +56,21 @@ export async function reconcilePending(input: ReconcileRunInput): Promise<Reconc
   if (registry !== undefined) {
     const ids = readTransaction(db, () =>
       db
-        .prepare("SELECT id FROM recovery_actions WHERE action = 'RETRIEVE' AND state IN ('DELIVERY_ACKED', 'RECORD_PENDING') ORDER BY updated_at, id")
+        .prepare(
+          `SELECT id, action FROM recovery_actions
+           WHERE (action = 'RETRIEVE' AND state IN ('DELIVERY_ACKED', 'RECORD_PENDING'))
+              OR (action = 'REPAY' AND state IN ('EXECUTION_REQUESTED', 'VERIFIED', 'RECORD_PENDING'))
+           ORDER BY updated_at, id`,
+        )
         .all()
-        .map((row) => String(row.id)),
+        .map((row) => ({ id: String(row.id), repay: row.action === "REPAY" })),
     );
-    for (const actionId of ids) {
+    for (const { id: actionId, repay } of ids) {
       try {
-        run.outcomes.push({ actionId, result: await recordRetrievalOutcome(db, { actionId, registry, now: input.now }) });
+        const result = repay
+          ? await completeRepayment(db, { actionId, registry, now: input.now })
+          : await recordRetrievalOutcome(db, { actionId, registry, now: input.now });
+        run.outcomes.push({ actionId, result });
       } catch (error) {
         run.outcomes.push({ actionId, error: describe(error) });
       }

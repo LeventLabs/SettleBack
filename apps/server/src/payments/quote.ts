@@ -8,7 +8,7 @@ import { appendEvent } from "../db/events.ts";
 import { getOperation } from "../db/operations.ts";
 
 /** How long a quoted cart stays payable, as the gateway suggests for one-time orders. */
-const CART_LIFETIME_MS = 2 * 60 * 60 * 1000;
+export const CART_LIFETIME_MS = 2 * 60 * 60 * 1000;
 const QUOTABLE: readonly PaymentAttemptState[] = ["CREATED", "PREPARED"];
 
 export class AttemptNotQuotableError extends StoreError {
@@ -113,32 +113,7 @@ export async function quoteOperation(db: DatabaseSync, input: QuoteInput): Promi
     expiresAt: new Date(Date.parse(attempt.createdAt) + CART_LIFETIME_MS).toISOString(),
   });
 
-  immediateTransaction(db, () => {
-    const row = db.prepare("SELECT state, revision, cart_sha256 FROM payment_attempts WHERE id = ?").get(attempt.id);
-    if (row === undefined) throw new Error(`payment attempt ${attempt.id} disappeared`);
-    const state = String(row.state) as PaymentAttemptState;
-    if (row.cart_sha256 !== null && row.cart_sha256 !== prepared.cartSha256) {
-      throw new StoreError("CART_MISMATCH", `Payment attempt ${attempt.id} was quoted with different cart contents.`);
-    }
-    if (state !== "CREATED") return;
-    assertTransition(PAYMENT_ATTEMPT_MACHINE, "CREATED", "PREPARED", { actor: "server" });
-    const revision = Number(row.revision);
-    const now = input.now().toISOString();
-    const updated = db
-      .prepare("UPDATE payment_attempts SET state = 'PREPARED', cart_sha256 = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?")
-      .run(prepared.cartSha256, revision + 1, now, attempt.id, revision);
-    if (updated.changes !== 1) throw new Error(`payment attempt ${attempt.id} changed while it was being quoted`);
-    appendEvent(db, {
-      entityType: "payment_attempt",
-      entityId: attempt.id,
-      eventType: prepared.recovered ? "PAYMENT_ATTEMPT_PREPARED_RECOVERED" : "PAYMENT_ATTEMPT_PREPARED",
-      priorRevision: revision,
-      newRevision: revision + 1,
-      actor: "server",
-      payloadSha256: prepared.cartSha256,
-      createdAt: now,
-    });
-  });
+  markPrepared(db, attempt.id, prepared, input.now().toISOString());
 
   return {
     attemptId: attempt.id,
@@ -148,4 +123,37 @@ export async function quoteOperation(db: DatabaseSync, input: QuoteInput): Promi
     cartSha256: prepared.cartSha256,
     recovered: prepared.recovered,
   };
+}
+
+/**
+ * Records the gateway order behind an attempt: CREATED becomes PREPARED with the cart hash. A
+ * repeated or recovered quote of the same attempt must carry the same cart; once the attempt has
+ * moved on, nothing changes.
+ */
+export function markPrepared(db: DatabaseSync, attemptId: string, prepared: { cartSha256: string; recovered: boolean }, now: string): void {
+  immediateTransaction(db, () => {
+    const row = db.prepare("SELECT state, revision, cart_sha256 FROM payment_attempts WHERE id = ?").get(attemptId);
+    if (row === undefined) throw new Error(`payment attempt ${attemptId} disappeared`);
+    const state = String(row.state) as PaymentAttemptState;
+    if (row.cart_sha256 !== null && row.cart_sha256 !== prepared.cartSha256) {
+      throw new StoreError("CART_MISMATCH", `Payment attempt ${attemptId} was quoted with different cart contents.`);
+    }
+    if (state !== "CREATED") return;
+    assertTransition(PAYMENT_ATTEMPT_MACHINE, "CREATED", "PREPARED", { actor: "server" });
+    const revision = Number(row.revision);
+    const updated = db
+      .prepare("UPDATE payment_attempts SET state = 'PREPARED', cart_sha256 = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?")
+      .run(prepared.cartSha256, revision + 1, now, attemptId, revision);
+    if (updated.changes !== 1) throw new Error(`payment attempt ${attemptId} changed while it was being quoted`);
+    appendEvent(db, {
+      entityType: "payment_attempt",
+      entityId: attemptId,
+      eventType: prepared.recovered ? "PAYMENT_ATTEMPT_PREPARED_RECOVERED" : "PAYMENT_ATTEMPT_PREPARED",
+      priorRevision: revision,
+      newRevision: revision + 1,
+      actor: "server",
+      payloadSha256: prepared.cartSha256,
+      createdAt: now,
+    });
+  });
 }

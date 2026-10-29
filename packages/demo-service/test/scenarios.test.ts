@@ -10,6 +10,7 @@ import {
   Worker,
   runServiceScenario,
   serviceStatusEvidence,
+  startServiceRun,
   type ScenarioRun,
   type ServiceEvidenceSource,
 } from "../src/index.ts";
@@ -172,5 +173,47 @@ describe("other service-side cases", () => {
     const size = result.store.list()[0]?.size;
     expect(edgeStatus(result)).toBe("200");
     expect(content(result, "edge-log")).toContain(`" 200 ${size} `);
+  });
+});
+
+describe("a run driven step by step", () => {
+  const start = "2026-10-30T10:00:00.000Z";
+  const at = (ms: number) => new Date(Date.parse(start) + ms);
+
+  it("ends with the same records as a run driven to completion at once", () => {
+    for (const caseId of ["lost-response", "refundable-failure-per-case", "hidden-completion"]) {
+      const faults = SERVICE_SCENARIOS[caseId];
+      if (faults === undefined) throw new Error(caseId);
+      const input = { operationId: "op-demo-0001", requestId: "req-7f3a", source: { id: source!.id, text }, faults, start };
+      const stepped = startServiceRun(input);
+      for (let ms = 0; ms <= 120_000; ms += 700) stepped.advanceTo(at(ms));
+      stepped.advanceTo(at(120_000));
+      expect(stepped.evidence(), caseId).toEqual(runServiceScenario(input).evidence);
+    }
+  });
+
+  it("reports the one response the buyer's connection gets, when it gets it", () => {
+    const responses: [string, number, number][] = [];
+    const cases: [string, Parameters<typeof startServiceRun>[0]["faults"]][] = [
+      ["delivered", {}],
+      ["dropped", { edge: { dropResponse: true } }],
+      ["failed", { worker: { failBeforeArtifact: true, durationMs: 4_000 } }],
+      ["timed out", { edge: { timeoutMs: 12_000 }, worker: { durationMs: 15_000 } }],
+    ];
+    for (const [name, faults] of cases) {
+      let run: ReturnType<typeof startServiceRun> | undefined;
+      run = startServiceRun({ operationId: "op-1", requestId: "req-1", source: { id: source!.id, text }, faults, start, onResponse: (status) => responses.push([name, status, run!.now().getTime() - Date.parse(start)]) });
+      // Halfway to the deadline nothing has failed or timed out yet.
+      run.advanceTo(at(3_000));
+      expect(responses.filter(([which]) => which === name && name !== "delivered" && name !== "dropped")).toEqual([]);
+      run.advanceTo(at(60_000));
+    }
+    expect(responses.map(([name, status]) => [name, status])).toEqual([
+      ["delivered", 200],
+      ["dropped", 499],
+      ["failed", 502],
+      ["timed out", 504],
+    ]);
+    expect(responses.find(([name]) => name === "timed out")?.[2]).toBe(12_000);
   });
 });

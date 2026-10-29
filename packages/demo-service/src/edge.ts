@@ -28,7 +28,8 @@ export class EdgeProxy {
     this.store = store;
   }
 
-  handle(operationId: string, request: JobRequest, faults: { edge?: EdgeFaults; worker?: WorkerFaults } = {}): void {
+  /** `onResponse` hears the status of the one response the edge writes, as the buyer's connection would. */
+  handle(operationId: string, request: JobRequest, faults: { edge?: EdgeFaults; worker?: WorkerFaults } = {}, onResponse?: (status: number) => void): void {
     const started = this.scheduler.now();
     const edge = faults.edge ?? {};
     let responded = false;
@@ -45,6 +46,7 @@ export class EdgeProxy {
           operationId,
         }),
       );
+      onResponse?.(status);
     };
 
     this.service.onSettled(operationId, (record) => {

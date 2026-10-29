@@ -63,8 +63,27 @@ export interface ScenarioInput {
   horizonMs?: number;
 }
 
-/** Runs the edge, job service, worker, and artifact store against one request and collects their records. */
-export function runServiceScenario(input: ScenarioInput): ScenarioRun {
+/** A request in progress against the components, moved forward explicitly; its records can be read at any point. */
+export interface ServiceRun {
+  readonly operationId: string;
+  readonly requestId: string;
+  readonly store: MemoryArtifactStore;
+  readonly service: JobService;
+  /** The components' time. */
+  now(): Date;
+  /** Runs everything due up to `time`, in order, and moves the components' clock there. */
+  advanceTo(time: Date): void;
+  status(): JobStatusRecord | undefined;
+  /** The four records as they stand now. */
+  evidence(): ServiceEvidence[];
+}
+
+/**
+ * Starts one request through the edge, job service, worker, and artifact store. Nothing runs until
+ * the run is advanced, so the same run can be driven to completion at once (fixtures) or in step
+ * with a wall clock (the live demo).
+ */
+export function startServiceRun(input: Omit<ScenarioInput, "horizonMs"> & { onResponse?: (status: number) => void }): ServiceRun {
   const clock = new ManualClock(input.start ?? "2026-10-30T10:00:00.000Z");
   const scheduler = new Scheduler(clock);
   const store = new MemoryArtifactStore();
@@ -72,27 +91,43 @@ export function runServiceScenario(input: ScenarioInput): ScenarioRun {
   const service = new JobService(scheduler, worker);
   const edge = new EdgeProxy(scheduler, service, store);
 
-  edge.handle(input.operationId, { requestId: input.requestId, sourceId: input.source.id, sourceText: input.source.text }, input.faults);
-  scheduler.run(input.horizonMs ?? 120_000);
+  edge.handle(input.operationId, { requestId: input.requestId, sourceId: input.source.id, sourceText: input.source.text }, input.faults, input.onResponse);
 
-  const status = service.status(input.operationId);
-  if (status === undefined) throw new Error("job was not started");
-
-  const evidence: ServiceEvidence[] = [
-    item("edge-log", "edge", "nginx access log with request and operation fields", edge.log.join("\n")),
-    item("worker-log", "worker", "worker application log (own job alias and clock)", worker.log.join("\n")),
-    serviceStatusEvidence(input.operationId, status),
-    item("artifact-store", "artifact-store", "artifact store records (JSON)", JSON.stringify(store.list(), null, 2)),
-  ];
   return {
     operationId: input.operationId,
     requestId: input.requestId,
-    capturedAt: clock.now().toISOString(),
-    status,
-    invocations: service.invocations(input.operationId),
     store,
     service,
-    evidence,
+    now: () => clock.now(),
+    advanceTo: (time) => {
+      const ahead = time.getTime() - clock.now().getTime();
+      if (ahead > 0) scheduler.run(ahead);
+    },
+    status: () => service.status(input.operationId),
+    evidence: () => [
+      item("edge-log", "edge", "nginx access log with request and operation fields", edge.log.join("\n")),
+      item("worker-log", "worker", "worker application log (own job alias and clock)", worker.log.join("\n")),
+      serviceStatusEvidence(input.operationId, service.status(input.operationId)),
+      item("artifact-store", "artifact-store", "artifact store records (JSON)", JSON.stringify(store.list(), null, 2)),
+    ],
+  };
+}
+
+/** Runs the edge, job service, worker, and artifact store against one request and collects their records. */
+export function runServiceScenario(input: ScenarioInput): ScenarioRun {
+  const run = startServiceRun(input);
+  run.advanceTo(new Date(run.now().getTime() + (input.horizonMs ?? 120_000)));
+  const status = run.status();
+  if (status === undefined) throw new Error("job was not started");
+  return {
+    operationId: input.operationId,
+    requestId: input.requestId,
+    capturedAt: run.now().toISOString(),
+    status,
+    invocations: run.service.invocations(input.operationId),
+    store: run.store,
+    service: run.service,
+    evidence: run.evidence(),
   };
 }
 

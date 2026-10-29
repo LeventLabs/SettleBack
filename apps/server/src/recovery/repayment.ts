@@ -4,12 +4,18 @@ import {
   RegistryOutcomeUnknownError,
   RegistryRevertError,
   assertProvenanceAllowed,
+  buildEip3009PaymentMandate,
+  submitPaymentMandate,
   validateCartMandate,
+  verifyEip3009Signature,
+  type Ap2MandatePayload,
   type PaymentRail,
   type PinnedMerchant,
+  type Provenance,
   type RegistryCase,
   type RegistryGateway,
   type RegistryWrite,
+  type ValidatedCart,
 } from "@settleback/adapters";
 import { REPAYMENT_EVIDENCE_SCHEMA, repaymentEvidenceSha256, type TransferTerms } from "@settleback/domain";
 import { getRecoveryAction, getRecoveryActionForCase, moveRecoveryAction, type RecoveryActionRecord } from "../db/actions.ts";
@@ -20,7 +26,7 @@ import { appendEvent } from "../db/events.ts";
 import { getOperation, type OperationRecord } from "../db/operations.ts";
 import { getPaymentAttempt, type PaymentAttemptRecord } from "../db/payments.ts";
 import { insertProofAllocation } from "../db/proofs.ts";
-import { ExecutionRefusedError, executePayment, type PaymentSigner } from "../payments/execution.ts";
+import { ExecutionRefusedError, claimExecution, executePayment, mandateDigest, type PaymentSigner } from "../payments/execution.ts";
 import { CART_LIFETIME_MS, markPrepared } from "../payments/quote.ts";
 import { freshness, moveCase, registrationTerms, requireRegistry, termsMismatch } from "./actions.ts";
 import type { OutcomeRecording } from "./retrieval.ts";
@@ -57,16 +63,21 @@ export type RepaymentRequest =
 const REQUESTED: readonly RecoveryActionRecord["state"][] = ["EXECUTION_REQUESTED", "VERIFIED", "RECORD_PENDING", "COMPLETED"];
 const LIVE_ATTEMPT = "purpose = 'REPAYMENT' AND state NOT IN ('REJECTED_NO_SEND', 'FAILED')";
 
+interface StagedRepayment {
+  action: RecoveryActionRecord;
+  operation: OperationRecord;
+  transfer: TransferTerms;
+  attempt: PaymentAttemptRecord;
+  cart: ValidatedCart;
+}
+
 /**
- * Pays a reserved per-case repayment: a new transfer from the seller to the buyer who paid, on the
- * original chain and token, for the principal, as an agent-to-agent payment in the opposite
- * direction. The reservation must be current in the database and on the registry. The attempt and
- * its gateway identifiers are stored before the order is created; the seller's Payment Agent checks
- * the Cart Mandate against the proposal's transfer; and the deadline and evidence are checked again
- * inside the transaction that consumes the one execution permit and moves the action and case to
- * EXECUTION_REQUESTED. A repeated request returns the repayment already under way, never a second one.
+ * Everything before the permit: the reservation must be current in the database and on the
+ * registry; the attempt and its gateway identifiers are stored before the order is created; and the
+ * seller's Payment Agent checks the Cart Mandate against the proposal's transfer. A repayment
+ * already requested is returned as such.
  */
-export async function requestRepayment(db: DatabaseSync, input: RequestRepaymentInput): Promise<RepaymentRequest> {
+async function stageRepayment(db: DatabaseSync, input: RequestRepaymentInput): Promise<StagedRepayment | { already: RecoveryActionRecord; attempt: PaymentAttemptRecord | undefined }> {
   const newId = input.newId ?? randomUUID;
   const read = readTransaction(db, () => {
     const action = getRecoveryActionForCase(db, input.caseId);
@@ -75,15 +86,15 @@ export async function requestRepayment(db: DatabaseSync, input: RequestRepayment
     const operation = requireOperation(db, action);
     if (input.requestedBy.toLowerCase() !== operation.seller) throw new RecoveryRefusedError("ROLE_FORBIDDEN", "Only the seller pays a repayment from its own account.");
     const registry = requireRegistry(input.registry, action.proposal);
-    if (REQUESTED.includes(action.state)) return { already: action, attempt: liveAttempt(db, action) };
+    if (REQUESTED.includes(action.state)) return { kind: "already" as const, action, attempt: liveAttempt(db, action) };
     if (action.state !== "RESERVED") throw new RecoveryRefusedError("WRONG_ACTION_STATE", `The repayment is ${action.state}; it can be paid only once reserved.`);
     if (action.authorizationMode !== "PER_CASE") {
       throw new RecoveryRefusedError("NOT_EXECUTABLE", "A standing-policy repayment is paid by the seller's guarded signer, which is not connected.");
     }
     assertExecutable(db, action, input.now());
-    return { action, operation, registry, transfer: requireTransfer(action) };
+    return { kind: "ready" as const, action, operation, registry, transfer: requireTransfer(action) };
   });
-  if ("already" in read) return { status: "ALREADY_REQUESTED", action: read.already, attempt: read.attempt };
+  if (read.kind === "already") return { already: read.action, attempt: read.attempt };
   const { action, operation, registry, transfer } = read;
   const { payments } = input;
   assertProvenanceAllowed(operation.environment, payments.rail.provenance);
@@ -127,7 +138,7 @@ export async function requestRepayment(db: DatabaseSync, input: RequestRepayment
     if (created === undefined) throw new Error(`payment attempt ${id} was not stored`);
     return created;
   });
-  if (attempt.state !== "CREATED" && attempt.state !== "PREPARED") return alreadyRequested(db, action.id);
+  if (attempt.state !== "CREATED" && attempt.state !== "PREPARED") return readTransaction(db, () => ({ already: reread(db, action.id), attempt: liveAttempt(db, action) }));
   if (attempt.cartMandateId === null || attempt.paymentRequestId === null) throw new ActionIntegrityError(`repayment attempt ${attempt.id} has no gateway identifiers`);
 
   const prepared = await payments.rail.prepare({
@@ -140,7 +151,7 @@ export async function requestRepayment(db: DatabaseSync, input: RequestRepayment
     tokenDecimals: operation.tokenDecimals,
     priceUsd: operation.priceUsd,
     label: "SettleBack repayment",
-    expiresAt: new Date(Date.parse(attempt.createdAt) + CART_LIFETIME_MS).toISOString(),
+    expiresAt: cartExpiryOf(attempt),
   });
   markPrepared(db, attempt.id, prepared, input.now().toISOString());
 
@@ -163,25 +174,45 @@ export async function requestRepayment(db: DatabaseSync, input: RequestRepayment
     now: input.now(),
   });
   if (!validation.ok) throw new RecoveryRefusedError("CART_REJECTED", `The repayment cart was rejected: ${validation.rejections.map((entry) => entry.message).join("; ")}.`);
+  return { action, operation, transfer, attempt, cart: validation.cart };
+}
 
+/**
+ * Inside the claiming transaction: the reservation must still be current and the case still
+ * RESERVED, and the action and case move to EXECUTION_REQUESTED together with the permit.
+ */
+function claimReservation(action: RecoveryActionRecord, operation: OperationRecord, now: () => Date): (tx: DatabaseSync) => void {
+  return (tx) => {
+    const current = getRecoveryAction(tx, action.id);
+    if (current === undefined || current.state !== "RESERVED") throw new RecoveryRefusedError("WRONG_ACTION_STATE", "The repayment is no longer reserved.");
+    const at = now();
+    assertExecutable(tx, current, at);
+    const label = `seller:${operation.seller}`;
+    moveRecoveryAction(tx, current, { to: "EXECUTION_REQUESTED", actor: "server", actorLabel: label, eventType: "RECOVERY_REPAYMENT_REQUESTED", now: at.toISOString() });
+    moveCase(tx, readCaseEvidence(tx, current.caseId).case, "EXECUTION_REQUESTED", { actor: "server" }, label, "CASE_EXECUTION_REQUESTED", at.toISOString(), {});
+  };
+}
+
+/**
+ * Pays a reserved per-case repayment with a server-side signer: a new transfer from the seller to
+ * the buyer who paid, on the original chain and token, for the principal, as an agent-to-agent
+ * payment in the opposite direction. The deadline and evidence are checked again inside the
+ * transaction that consumes the one execution permit. A repeated request returns the repayment
+ * already under way, never a second one.
+ */
+export async function requestRepayment(db: DatabaseSync, input: RequestRepaymentInput): Promise<RepaymentRequest> {
+  const staged = await stageRepayment(db, input);
+  if ("already" in staged) return { status: "ALREADY_REQUESTED", action: staged.already, attempt: staged.attempt };
+  const { action, operation, transfer, attempt, cart } = staged;
   try {
     const outcome = await executePayment(db, {
       attemptId: attempt.id,
       requestedBy: transfer.payer,
-      cart: validation.cart,
-      signer: payments.signer,
-      rail: payments.rail,
+      cart,
+      signer: input.payments.signer,
+      rail: input.payments.rail,
       now: input.now,
-      onClaim: (tx) => {
-        const current = getRecoveryAction(tx, action.id);
-        if (current === undefined || current.state !== "RESERVED") throw new RecoveryRefusedError("WRONG_ACTION_STATE", "The repayment is no longer reserved.");
-        const now = input.now();
-        assertExecutable(tx, current, now);
-        const at = now.toISOString();
-        const label = `seller:${operation.seller}`;
-        moveRecoveryAction(tx, current, { to: "EXECUTION_REQUESTED", actor: "server", actorLabel: label, eventType: "RECOVERY_REPAYMENT_REQUESTED", now: at });
-        moveCase(tx, readCaseEvidence(tx, current.caseId).case, "EXECUTION_REQUESTED", { actor: "server" }, label, "CASE_EXECUTION_REQUESTED", at, {});
-      },
+      onClaim: claimReservation(action, operation, input.now),
     });
     const after = reread(db, action.id);
     return outcome.status === "SUBMITTED"
@@ -192,6 +223,145 @@ export async function requestRepayment(db: DatabaseSync, input: RequestRepayment
     if (error instanceof ExecutionRefusedError && error.code === "PERMIT_CONSUMED") return alreadyRequested(db, action.id);
     throw error;
   }
+}
+
+export type RepaymentSignatureRequest =
+  | { status: "SIGNATURE_REQUIRED"; action: RecoveryActionRecord; attempt: PaymentAttemptRecord; payload: Ap2MandatePayload }
+  | { status: "ALREADY_REQUESTED"; action: RecoveryActionRecord; attempt: PaymentAttemptRecord | undefined };
+
+/**
+ * The first step when the seller signs in its own wallet. The permit is consumed and the action
+ * moves to EXECUTION_REQUESTED, as for a server-side signer, and the seller receives the AP2 Payment
+ * Mandate with its EIP-3009 authorization to sign. Until a signature is submitted the same mandate
+ * is offered again, rebuilt from the attempt and checked against the digest recorded with the
+ * permit; its nonce lets the token execute it at most once, so offering it again cannot pay twice.
+ */
+export async function requestRepaymentSignature(db: DatabaseSync, input: RequestRepaymentInput): Promise<RepaymentSignatureRequest> {
+  const pending = awaitingSignature(db, input);
+  if (pending !== undefined) return pending;
+  const staged = await stageRepayment(db, input);
+  if ("already" in staged) return awaitingSignature(db, input) ?? { status: "ALREADY_REQUESTED", action: staged.already, attempt: staged.attempt };
+  const { action, operation, transfer, attempt, cart } = staged;
+  const merchantName = input.payments.merchant.merchantName;
+  const provenance = input.payments.rail.provenance;
+  try {
+    const claim = claimExecution(db, {
+      attemptId: attempt.id,
+      requestedBy: transfer.payer,
+      cart,
+      provenances: [provenance],
+      now: input.now().toISOString(),
+      onClaim: claimReservation(action, operation, input.now),
+      mandate: (_cart, current) => repaymentMandate(current, operation, merchantName, provenance),
+    });
+    if (claim.payload.kind !== "ap2-eip3009") throw new Error("expected an AP2 mandate");
+    return { status: "SIGNATURE_REQUIRED", action: reread(db, action.id), attempt: claim.attempt, payload: claim.payload };
+  } catch (error) {
+    if (error instanceof ExecutionRefusedError && error.code === "PERMIT_CONSUMED") return awaitingSignature(db, input) ?? alreadyRequested(db, action.id);
+    throw error;
+  }
+}
+
+export type RepaymentSubmission =
+  | { status: "SUBMITTED"; action: RecoveryActionRecord; attempt: PaymentAttemptRecord }
+  | { status: "OUTCOME_UNKNOWN"; action: RecoveryActionRecord; attempt: PaymentAttemptRecord; reason: string }
+  | { status: "ALREADY_REQUESTED"; action: RecoveryActionRecord; attempt: PaymentAttemptRecord | undefined };
+
+/**
+ * The second step: the seller's EIP-712 signature of the mandate's authorization. It is accepted
+ * only if it is the payer's signature of exactly the mandate recorded with the permit, and is then
+ * submitted to the gateway. A lost response may be followed by the same signature again; the token
+ * executes the authorization's nonce at most once, and reconciliation settles what happened.
+ */
+export async function submitRepaymentSignature(
+  db: DatabaseSync,
+  input: { caseId: string; requestedBy: string; signature: string; registry: RegistryGateway | undefined; payments: RepaymentPayments; now: () => Date },
+): Promise<RepaymentSubmission> {
+  const read = readTransaction(db, () => {
+    const action = getRecoveryActionForCase(db, input.caseId);
+    if (action === undefined) throw new RecoveryRefusedError("ACTION_NOT_FOUND", `Case ${input.caseId} has no recovery action.`);
+    if (action.action !== "REPAY") throw new RecoveryRefusedError("WRONG_ACTION_STATE", "Only a repayment is paid.");
+    const operation = requireOperation(db, action);
+    if (input.requestedBy.toLowerCase() !== operation.seller) throw new RecoveryRefusedError("ROLE_FORBIDDEN", "Only the seller pays a repayment from its own account.");
+    requireRegistry(input.registry, action.proposal);
+    const attempt = liveAttempt(db, action);
+    return { action, operation, attempt };
+  });
+  const { action, operation, attempt } = read;
+  if (attempt === undefined || action.state === "RESERVED" || action.state === "PREPARED") {
+    throw new RecoveryRefusedError("WRONG_ACTION_STATE", "Request the repayment mandate before signing it.");
+  }
+  if (attempt.state !== "SIGNING_REQUESTED") return { status: "ALREADY_REQUESTED", action, attempt };
+  const provenance = input.payments.rail.provenance;
+  const payload = repaymentMandate(attempt, operation, input.payments.merchant.merchantName, provenance);
+  if (mandateDigest(payload) !== attempt.paymentMandateSha256) throw new ActionIntegrityError(`repayment attempt ${attempt.id} no longer matches the mandate recorded with its permit`);
+  if (!(await verifyEip3009Signature(payload, input.signature))) {
+    throw new RecoveryRefusedError("MANDATE_SIGNATURE_INVALID", "The signature is not the seller's signature of this repayment's authorization.");
+  }
+  try {
+    const submission = await submitPaymentMandate(input.payments.rail, { payload, signature: input.signature });
+    const after = reread(db, action.id);
+    return submission === "SUBMITTED"
+      ? { status: "SUBMITTED", action: after, attempt }
+      : { status: "OUTCOME_UNKNOWN", action: after, attempt, reason: "the submission response was lost and the gateway shows no payment yet" };
+  } catch (error) {
+    // Refused because another submission of the same authorization got there first: that is the repayment.
+    if (attempt.paymentRequestId !== null && (await gatewayMovedOn(input.payments.rail, attempt.paymentRequestId))) return alreadyRequested(db, action.id);
+    return { status: "OUTCOME_UNKNOWN", action: reread(db, action.id), attempt, reason: `the gateway did not accept the submission (${describe(error)})` };
+  }
+}
+
+/** The mandate a repayment's payer signs, rebuilt only from what the attempt and the operation fix. */
+export function repaymentMandate(attempt: PaymentAttemptRecord, operation: OperationRecord, merchantName: string, provenance: Provenance): Ap2MandatePayload {
+  if (attempt.cartMandateId === null || attempt.paymentRequestId === null || attempt.cartSha256 === null) {
+    throw new ActionIntegrityError(`repayment attempt ${attempt.id} has no prepared cart`);
+  }
+  return buildEip3009PaymentMandate({
+    provenance,
+    cartMandateId: attempt.cartMandateId,
+    paymentRequestId: attempt.paymentRequestId,
+    cartSha256: attempt.cartSha256,
+    payer: attempt.payer,
+    payee: attempt.payee,
+    chainId: attempt.chainId,
+    token: attempt.token,
+    amountBaseUnits: attempt.amountBaseUnits,
+    totalUsd: operation.priceUsd,
+    cartExpiry: cartExpiryOf(attempt),
+    merchantName,
+    issuedAt: attempt.createdAt,
+  });
+}
+
+/** A repayment whose permit is consumed but whose signature has not been submitted: offer the same mandate again. */
+function awaitingSignature(db: DatabaseSync, input: RequestRepaymentInput): RepaymentSignatureRequest | undefined {
+  const found = readTransaction(db, () => {
+    const action = getRecoveryActionForCase(db, input.caseId);
+    if (action === undefined || action.action !== "REPAY" || action.state !== "EXECUTION_REQUESTED") return undefined;
+    const operation = requireOperation(db, action);
+    if (input.requestedBy.toLowerCase() !== operation.seller) throw new RecoveryRefusedError("ROLE_FORBIDDEN", "Only the seller pays a repayment from its own account.");
+    const attempt = liveAttempt(db, action);
+    return attempt?.state === "SIGNING_REQUESTED" ? { action, operation, attempt } : undefined;
+  });
+  if (found === undefined) return undefined;
+  const payload = repaymentMandate(found.attempt, found.operation, input.payments.merchant.merchantName, input.payments.rail.provenance);
+  if (mandateDigest(payload) !== found.attempt.paymentMandateSha256) {
+    // A mandate of another kind (for example a server-side signer's) was claimed; it is not offered to a wallet.
+    return { status: "ALREADY_REQUESTED", action: found.action, attempt: found.attempt };
+  }
+  return { status: "SIGNATURE_REQUIRED", action: found.action, attempt: found.attempt, payload };
+}
+
+async function gatewayMovedOn(rail: PaymentRail, paymentRequestId: string): Promise<boolean> {
+  try {
+    return (await rail.observe(paymentRequestId)).record.status !== "payment-required";
+  } catch {
+    return false;
+  }
+}
+
+function cartExpiryOf(attempt: PaymentAttemptRecord): string {
+  return new Date(Date.parse(attempt.createdAt) + CART_LIFETIME_MS).toISOString();
 }
 
 /**
@@ -336,7 +506,7 @@ export function liveAttempt(db: DatabaseSync, action: RecoveryActionRecord): Pay
   return attempt;
 }
 
-function alreadyRequested(db: DatabaseSync, actionId: string): RepaymentRequest {
+function alreadyRequested(db: DatabaseSync, actionId: string): { status: "ALREADY_REQUESTED"; action: RecoveryActionRecord; attempt: PaymentAttemptRecord | undefined } {
   return readTransaction(db, () => {
     const action = reread(db, actionId);
     return { status: "ALREADY_REQUESTED", action, attempt: liveAttempt(db, action) };

@@ -3,7 +3,7 @@ import { api, retrieveResult, type DeliveredResult } from "./api.ts";
 import type { Runner } from "./CaseWorkspace.tsx";
 import { actionLabel, short, stateLabel, toneOf, when } from "./format.ts";
 import type { ActionView, CaseView } from "./types.ts";
-import { sendTransaction, type WalletAccount } from "./wallet.ts";
+import { sendTransaction, signTypedData, switchChain, type WalletAccount } from "./wallet.ts";
 
 const STEPS: Record<"RETRIEVE" | "REPAY", { state: string; label: string }[]> = {
   RETRIEVE: [
@@ -171,11 +171,20 @@ function NextStep({ data, action, wallet, runner, isSeller }: { data: CaseView; 
   }
 
   async function repay() {
+    if (wallet === null) return;
     await runner.run("repay", async () => {
-      const outcome = await api<{ status: string; reason?: string }>(`${base}/recovery/repay`, { method: "POST", wallet });
-      if (outcome.status === "SUBMITTED") return "The repayment was submitted once. The case closes after the transfer is final on chain and the registry records it.";
-      if (outcome.status === "ALREADY_REQUESTED") return "This repayment was already requested; it is not paid twice.";
-      return `The submission's outcome is unknown (${outcome.reason ?? "no reason given"}). It will be reconciled from the gateway and the chain, never sent again.`;
+      const requested = await api<{ status: string; typedData?: { domain: { chainId: number } } }>(`${base}/recovery/repay`, { method: "POST", wallet });
+      if (requested.status !== "SIGNATURE_REQUIRED" || requested.typedData === undefined) return "This repayment was already submitted; it is not paid twice.";
+      // The authorization names the payment chain; wallets sign typed data only on the chain its domain names.
+      const paymentChain = requested.typedData.domain.chainId;
+      if (wallet.chainId !== paymentChain) await switchChain(paymentChain);
+      const signer = { ...wallet, chainId: paymentChain };
+      // The wallet signs an EIP-3009 authorization of exactly this transfer; the server checks it before submitting.
+      const signature = await signTypedData(signer, requested.typedData);
+      const outcome = await api<{ status: string; reason?: string }>(`${base}/recovery/repay/signature`, { method: "POST", body: { signature }, wallet: signer });
+      if (outcome.status === "SUBMITTED") return "Your authorization was submitted once. The case closes after the transfer is final on chain and the registry records it.";
+      if (outcome.status === "ALREADY_REQUESTED") return "This authorization was already submitted; it is not paid twice.";
+      return { tone: "attention", text: `The submission's outcome is unknown (${outcome.reason ?? "no reason given"}). It is reconciled from the gateway and the chain, never paid twice.` };
     });
   }
 
@@ -217,15 +226,17 @@ function NextStep({ data, action, wallet, runner, isSeller }: { data: CaseView; 
       );
     }
     if (action.state === "PREPARED") return <p className="panel__aside">Waiting for the seller to approve the reservation from its wallet.</p>;
-    if (action.state === "RESERVED" && isSeller) {
+    const awaitingSignature = action.state === "EXECUTION_REQUESTED" && data.repayment?.state === "SIGNING_REQUESTED";
+    if ((action.state === "RESERVED" || awaitingSignature) && isSeller) {
       return (
         <div className="action">
           <p className="action__why">
-            Pay a new transfer of ${data.operation.priceUsd} from your account to the buyer who paid. It is paid once, however often you click. In this local demo the Payment Mandate is signed by the
-            labeled simulator, because the live format is not published yet.
+            Pay a new transfer of ${data.operation.priceUsd} from your account to the buyer who paid. Your wallet signs an EIP-3009 authorization of exactly this amount, token, and recipient, inside
+            an AP2 Payment Mandate. Its nonce lets the token execute it once, however often you sign or click. Your wallet switches to the payment chain ({data.operation.chainId}) to sign. The gateway that executes it is simulated in this local demo; the signature is real.
           </p>
+          {awaitingSignature && <p className="panel__aside">The mandate is issued. If you already signed it, signing again cannot pay twice.</p>}
           <button type="button" className="button" disabled={busy} onClick={() => void repay()}>
-            {runner.working === "repay" ? "Submitting…" : "Pay the repayment"}
+            {runner.working === "repay" ? "Waiting for the wallet…" : awaitingSignature ? "Sign the repayment again" : "Pay the repayment"}
           </button>
         </div>
       );

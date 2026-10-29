@@ -8,6 +8,7 @@ export * from "./hsp/cart-mandate.ts";
 export * from "./hsp/jwt.ts";
 export * from "./hsp/merchant-client.ts";
 export * from "./hsp/payment-agent.ts";
+export * from "./hsp/payment-mandate.ts";
 export * from "./hsp/quote.ts";
 export * from "./hsp/request-signing.ts";
 export * from "./provenance.ts";

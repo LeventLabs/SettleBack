@@ -136,7 +136,8 @@ export type RecoveryRefusal =
   | "ARTIFACT_MISMATCH"
   | "ACK_DIGEST_MISMATCH"
   | "REGISTRY_OUTCOME_MISMATCH"
-  | "CART_REJECTED";
+  | "CART_REJECTED"
+  | "MANDATE_SIGNATURE_INVALID";
 
 /** A recovery step refused before anything was changed, on chain or in the database. */
 export class RecoveryRefusedError extends StoreError {

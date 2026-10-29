@@ -63,7 +63,7 @@ export class SimulatedPaymentRail implements PaymentRail {
     if (signed.payload.provenance !== "SIMULATED") {
       throw new RailRejectedError("PROVENANCE", "The simulated rail accepts only simulated payloads");
     }
-    this.gateway.submitPaymentMandate(signed);
+    await this.gateway.submitPaymentMandate(signed);
   }
 
   async observe(paymentRequestId: string): Promise<RailObservation> {

@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance } from "fastify";
-import type { RegistryGateway, WalletCall } from "@settleback/adapters";
+import { walletTypedData, type RegistryGateway, type WalletCall } from "@settleback/adapters";
 import type { PolicyTerms } from "@settleback/domain";
 import type { Session } from "../auth/sessions.ts";
 import { getDeliveryAck, getRecoveryActionForCase, type RecoveryActionRecord } from "../db/actions.ts";
@@ -14,7 +14,7 @@ import { confirmRepaymentReservation, prepareRecovery } from "../recovery/action
 import { assessCase } from "../recovery/assessment.ts";
 import { readCaseBaseline } from "../recovery/baseline.ts";
 import type { AssessmentProvider } from "../recovery/provider.ts";
-import { liveAttempt, requestRepayment, type RepaymentPayments } from "../recovery/repayment.ts";
+import { liveAttempt, requestRepaymentSignature, submitRepaymentSignature, type RepaymentPayments } from "../recovery/repayment.ts";
 import { acknowledgeDelivery, retrieveResult, type ResultLookup } from "../recovery/retrieval.ts";
 import type { RequestGuard } from "./guard.ts";
 import { actionView, assessmentView, attemptView, caseSummaryView, caseView, operationView, type Relation } from "./views.ts";
@@ -191,21 +191,46 @@ export function registerCaseRoutes(app: FastifyInstance, deps: CaseRouteDependen
     },
   );
 
-  // Pays the reserved per-case repayment once; a repeated request answers with the repayment under way.
+  // The seller's wallet pays the repayment in two steps: this returns the mandate to sign, once the
+  // permit is consumed; a repeated request offers the same mandate or reports the repayment under way.
   app.post("/api/cases/:id/recovery/repay", { schema: { params: ID_PARAMS } }, async (request) => {
     const session = guard.session(request, { wallet: true });
     const { id } = request.params as { id: string };
     const { relations } = readTransaction(db, () => scopeCase(db, session, id));
     requireRelation(relations, ["seller"], "Only the operation's seller pays its repayment.");
-    if (deps.payments === undefined) throw new RecoveryRefusedError("DEPENDENCY_UNAVAILABLE", "Payment writes are disabled or no payment rail is connected; repayments cannot be paid.");
-    const outcome = await requestRepayment(db, { caseId: id, requestedBy: session.address, registry: deps.registry, payments: deps.payments, now });
+    const payments = requirePayments(deps.payments);
+    const outcome = await requestRepaymentSignature(db, { caseId: id, requestedBy: session.address, registry: deps.registry, payments, now });
     return {
       status: outcome.status,
-      ...(outcome.status === "OUTCOME_UNKNOWN" ? { reason: outcome.reason } : {}),
+      ...(outcome.status === "SIGNATURE_REQUIRED" ? { typedData: walletTypedData(outcome.payload), mandate: outcome.payload.mandate } : {}),
       action: actionView(outcome.action),
       payment: outcome.attempt === undefined ? null : attemptView(outcome.attempt),
     };
   });
+
+  app.post(
+    "/api/cases/:id/recovery/repay/signature",
+    {
+      schema: {
+        params: ID_PARAMS,
+        body: { type: "object", additionalProperties: false, required: ["signature"], properties: { signature: { type: "string", pattern: "^0x[0-9a-fA-F]{130}$" } } },
+      },
+    },
+    async (request) => {
+      const session = guard.session(request, { wallet: true });
+      const { id } = request.params as { id: string };
+      const { signature } = request.body as { signature: string };
+      const { relations } = readTransaction(db, () => scopeCase(db, session, id));
+      requireRelation(relations, ["seller"], "Only the operation's seller pays its repayment.");
+      const outcome = await submitRepaymentSignature(db, { caseId: id, requestedBy: session.address, signature, registry: deps.registry, payments: requirePayments(deps.payments), now });
+      return {
+        status: outcome.status,
+        ...(outcome.status === "OUTCOME_UNKNOWN" ? { reason: outcome.reason } : {}),
+        action: actionView(outcome.action),
+        payment: outcome.attempt === undefined ? null : attemptView(outcome.attempt),
+      };
+    },
+  );
 
   // A GET because the buyer reads the result, but it releases a reserved retrieval, so it needs the
   // wallet header like a write; a cross-site page cannot send that header without a preflight.
@@ -292,6 +317,11 @@ function requireRelation(relations: readonly Relation[], allowed: readonly Relat
 
 function requireTerms(terms: ReadonlyMap<string, PolicyTerms>, operation: OperationRecord): void {
   if (!terms.has(operation.policyId)) throw new RecoveryRefusedError("DEPENDENCY_UNAVAILABLE", `No service terms are loaded for policy ${operation.policyId}.`);
+}
+
+function requirePayments(payments: RepaymentPayments | undefined): RepaymentPayments {
+  if (payments === undefined) throw new RecoveryRefusedError("DEPENDENCY_UNAVAILABLE", "Payment writes are disabled or no payment rail is connected; repayments cannot be paid.");
+  return payments;
 }
 
 function requireLookup(lookup: ResultLookup | undefined): ResultLookup {

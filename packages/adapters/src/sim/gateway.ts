@@ -6,7 +6,8 @@ import { CartShapeError, cartAmountProblems, cartHash, effectiveTotal, normalize
 import { verifyMerchantJwt } from "../hsp/jwt.ts";
 import { ORDERS_PATH, PAYMENTS_PATH, type MerchantHttpRequest, type MerchantHttpResponse } from "../hsp/merchant-client.ts";
 import { REQUEST_SKEW_SECONDS, verifyMerchantRequest } from "../hsp/request-signing.ts";
-import { RailTimeoutError, RailUnavailableError, type SignedPayload } from "../rail.ts";
+import { verifyEip3009Signature, tokenDomain } from "../hsp/payment-mandate.ts";
+import { RailTimeoutError, RailUnavailableError, type Ap2MandatePayload, type SignedPayload } from "../rail.ts";
 import { signWebhook } from "../webhook.ts";
 import type { SimChain } from "./chain.ts";
 
@@ -84,6 +85,8 @@ export class SimGateway {
   private readonly orders = new Map<string, Order>();
   private readonly cartIndex = new Map<string, string>();
   private readonly pendingFaults = new Map<string, GatewayFault[]>();
+  /** EIP-3009 nonces already used per token and payer, as the token contract would record them. */
+  private readonly usedAuthorizations = new Set<string>();
   private receiver: WebhookReceiver | undefined;
   private flowCounter = 0;
 
@@ -165,10 +168,16 @@ export class SimGateway {
 
   /**
    * Simulated Payment Mandate submission. It accepts only a payload bound to the order's cart hash,
-   * naming one of the cart's payment options, for that option's amount due.
+   * naming one of the cart's payment options, for that option's amount due. An AP2 mandate must
+   * carry the payer's valid EIP-3009 signature of exactly that transfer, under the token's pinned
+   * domain, inside its validity window, with a nonce the token has not seen; a placeholder mandate
+   * carries the labeled placeholder signature.
    */
-  submitPaymentMandate(signed: SignedPayload): void {
+  async submitPaymentMandate(signed: SignedPayload): Promise<void> {
     const { payload } = signed;
+    if (payload.kind === "ap2-eip3009" && !(await this.authorizes(payload, signed.signature))) {
+      throw new GatewayError("10001", 400, "Invalid parameters: payment authorization does not verify");
+    }
     const order = this.orders.get(payload.paymentRequestId);
     if (order === undefined) throw new GatewayError("10003", 404, "Not found");
     if (order.record.status !== "payment-required") throw new GatewayError("40001", 400, "Invalid mandate state: payment already submitted");
@@ -185,10 +194,11 @@ export class SimGateway {
       payload.cartSha256 !== order.cartSha256 ||
       methodIndex === -1 ||
       payload.amountBaseUnits !== expectedAmount ||
-      signed.signature !== simulatedSignature(payload.payer, payload.nonce)
+      (payload.kind !== "ap2-eip3009" && signed.signature !== simulatedSignature(payload.payer, payload.nonce))
     ) {
       throw new GatewayError("10001", 400, "Invalid parameters: payment mandate does not match the order");
     }
+    if (payload.kind === "ap2-eip3009") this.usedAuthorizations.add(authorizationKey(payload.token, payload.authorization.from, payload.authorization.nonce));
     order.methodIndex = methodIndex;
     order.record = {
       ...this.describe(order),
@@ -197,6 +207,31 @@ export class SimGateway {
       request_id: `sim-req-${payload.nonce.slice(0, 16)}`,
     };
     if (this.consumeFault(order, "lose-submit-response")) throw new RailTimeoutError("submit payment mandate");
+  }
+
+  /** The token-contract checks an EIP-3009 authorization must pass, before the order-level checks. */
+  private async authorizes(payload: Ap2MandatePayload, signature: string): Promise<boolean> {
+    const auth = payload.authorization;
+    const pinned = tokenDomain(payload.chainId, payload.token);
+    const now = Math.floor(this.clock.now().getTime() / 1000);
+    const contents = payload.mandate.payment_mandate_contents;
+    return (
+      pinned !== undefined &&
+      pinned.name === payload.domain.name &&
+      pinned.version === payload.domain.version &&
+      pinned.chainId === payload.domain.chainId &&
+      pinned.verifyingContract === payload.domain.verifyingContract.toLowerCase() &&
+      auth.from.toLowerCase() === payload.payer.toLowerCase() &&
+      auth.to.toLowerCase() === payload.payee.toLowerCase() &&
+      auth.value === payload.amountBaseUnits &&
+      auth.nonce === payload.nonce &&
+      BigInt(auth.validAfter) <= BigInt(now) &&
+      BigInt(now) < BigInt(auth.validBefore) &&
+      !this.usedAuthorizations.has(authorizationKey(payload.token, auth.from, auth.nonce)) &&
+      contents.payment_mandate_id === payload.paymentRequestId &&
+      JSON.stringify(contents.payment_response.details.authorization) === JSON.stringify(auth) &&
+      (await verifyEip3009Signature(payload, signature))
+    );
   }
 
   /** Advances every in-flight payment by one documented status step and mines one block. */
@@ -430,6 +465,10 @@ export class SimGateway {
     order.faults.splice(index, 1);
     return true;
   }
+}
+
+function authorizationKey(token: string, from: string, nonce: string): string {
+  return `${token.toLowerCase()}:${from.toLowerCase()}:${nonce.toLowerCase()}`;
 }
 
 /** Placeholder signature for simulated payloads; the live signing scheme awaits official documentation. */

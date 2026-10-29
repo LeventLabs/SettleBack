@@ -80,6 +80,17 @@ function call(app: FastifyInstance, caller: Caller | undefined, method: "GET" | 
   return app.inject({ method, url, headers, ...(options.payload === undefined ? {} : { payload: options.payload }) });
 }
 
+/** Signs the wallet typed data the server offered, as the account's own wallet would. */
+async function signMandate(account: PrivateKeyAccount, typed: { domain: { name: string; version: string; chainId: number; verifyingContract: string }; types: Record<string, { name: string; type: string }[]>; message: Record<string, string> }): Promise<string> {
+  const { message } = typed;
+  return account.signTypedData({
+    domain: { ...typed.domain, verifyingContract: typed.domain.verifyingContract as `0x${string}` },
+    types: { TransferWithAuthorization: typed.types.TransferWithAuthorization ?? [] },
+    primaryType: "TransferWithAuthorization",
+    message: { from: message.from as `0x${string}`, to: message.to as `0x${string}`, value: BigInt(message.value ?? "0"), validAfter: BigInt(message.validAfter ?? "0"), validBefore: BigInt(message.validBefore ?? "0"), nonce: message.nonce as `0x${string}` },
+  });
+}
+
 function errorCode(response: LightMyRequestResponse): string {
   return response.json().error?.code;
 }
@@ -208,11 +219,27 @@ describe("per-case repayment over HTTP", () => {
     expect([writesOff.statusCode, errorCode(writesOff)]).toEqual([503, "DEPENDENCY_UNAVAILABLE"]);
     expect(writesOff.json().error.message).toMatch(/Payment writes are disabled/);
 
-    const paid = await call(app, asSeller, "POST", url);
+    const requested = await call(app, asSeller, "POST", url);
+    expect(requested.statusCode, requested.body).toBe(200);
+    const body = requested.json();
+    expect(body).toMatchObject({ status: "SIGNATURE_REQUIRED", action: { state: "EXECUTION_REQUESTED" }, payment: { purpose: "REPAYMENT", state: "SIGNING_REQUESTED", payer: parties.seller, payee: parties.buyer } });
+    expect(body.typedData).toMatchObject({ primaryType: "TransferWithAuthorization", domain: { name: "USD Coin", version: "2", chainId: 133 }, message: { from: parties.seller, to: parties.buyer, value: "1000000" } });
+    expect(body.mandate.payment_mandate_contents.payment_mandate_id).toBe(body.payment.paymentRequestId);
+    // Until it is signed, the same mandate is offered again; nothing new is authorized.
+    expect((await call(app, asSeller, "POST", url)).json().typedData).toEqual(body.typedData);
+
+    const signatureUrl = `${url}/signature`;
+    const malformed = await call(app, asSeller, "POST", signatureUrl, { payload: { signature: "0x1234" } });
+    expect([malformed.statusCode, errorCode(malformed)]).toEqual([400, "INVALID_REQUEST"]);
+    const forged = await call(app, asSeller, "POST", signatureUrl, { payload: { signature: await signMandate(stranger, body.typedData) } });
+    expect([forged.statusCode, errorCode(forged)]).toEqual([409, "MANDATE_SIGNATURE_INVALID"]);
+    expect(errorCode(await call(app, asBuyer, "POST", signatureUrl, { payload: { signature: await signMandate(buyer, body.typedData) } }))).toBe("ROLE_FORBIDDEN");
+    const signature = await signMandate(seller, body.typedData);
+    const paid = await call(app, asSeller, "POST", signatureUrl, { payload: { signature } });
     expect(paid.statusCode, paid.body).toBe(200);
-    expect(paid.json()).toMatchObject({ status: "SUBMITTED", action: { state: "EXECUTION_REQUESTED" }, payment: { purpose: "REPAYMENT", state: "SIGNING_REQUESTED", payer: parties.seller, payee: parties.buyer } });
-    const again = await call(app, asSeller, "POST", url);
-    expect(again.json()).toMatchObject({ status: "ALREADY_REQUESTED", payment: { id: paid.json().payment.id } });
+    expect(paid.json()).toMatchObject({ status: "SUBMITTED", payment: { id: body.payment.id } });
+    // The same authorization again cannot pay twice.
+    expect((await call(app, asSeller, "POST", signatureUrl, { payload: { signature } })).json()).toMatchObject({ status: "ALREADY_REQUESTED", payment: { id: body.payment.id } });
 
     for (let tick = 0; tick < 6; tick += 1) sim.gateway.tick();
     await reconcilePending({ db, rail: sim.rail, registry: chain.registry, now: () => new Date(), requiredLevel: "FINAL" });

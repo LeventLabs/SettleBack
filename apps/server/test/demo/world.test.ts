@@ -88,7 +88,16 @@ describe("the local demo", () => {
     const reservation = await chain.sendAs(parties.seller as Address, prepared.sellerCall);
     await chain.mined(reservation);
     expect((await call(asSeller, "POST", `/api/cases/${refundable.caseId}/recovery/approval-tx`, { txHash: reservation })).json().status).toBe("CONFIRMED");
-    expect((await call(asSeller, "POST", `/api/cases/${refundable.caseId}/recovery/repay`)).json().status).toBe("SUBMITTED");
+    const requested = (await call(asSeller, "POST", `/api/cases/${refundable.caseId}/recovery/repay`)).json();
+    expect(requested.status).toBe("SIGNATURE_REQUIRED");
+    const typed = requested.typedData;
+    const signature = await seller.signTypedData({
+      domain: typed.domain,
+      types: { TransferWithAuthorization: typed.types.TransferWithAuthorization },
+      primaryType: "TransferWithAuthorization",
+      message: { ...typed.message, value: BigInt(typed.message.value), validAfter: BigInt(typed.message.validAfter), validBefore: BigInt(typed.message.validBefore) },
+    });
+    expect((await call(asSeller, "POST", `/api/cases/${refundable.caseId}/recovery/repay/signature`, { signature })).json().status).toBe("SUBMITTED");
 
     let status = "";
     for (let round = 0; round < 50 && status !== "REPAID"; round += 1) {

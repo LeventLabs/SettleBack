@@ -45,6 +45,8 @@ export interface ClaimExecutionInput {
    * caller atomically with it: a repayment rechecks its reservation and moves its action here.
    */
   onClaim?: (db: DatabaseSync, attempt: PaymentAttemptRecord) => void;
+  /** Builds the mandate the payer signs; by default the labeled placeholder mandate. */
+  mandate?: (cart: ValidatedCart, attempt: PaymentAttemptRecord) => ExecutionPayload;
 }
 
 export interface ExecutionClaim {
@@ -81,8 +83,8 @@ export function claimExecution(db: DatabaseSync, input: ClaimExecutionInput): Ex
     if (mismatches.length > 0) throw new ExecutionRefusedError("CART_MISMATCH", `The cart does not match payment attempt ${attempt.id}: ${mismatches.join(", ")}.`);
     input.onClaim?.(db, attempt);
 
-    const payload = mandateFor(input.cart, attempt, input.provenances);
-    const paymentMandateSha256 = sha256Hex(canonicalJson(payload as unknown as CanonicalValue));
+    const payload = input.mandate === undefined ? mandateFor(input.cart, attempt, input.provenances) : input.mandate(input.cart, attempt);
+    const paymentMandateSha256 = mandateDigest(payload);
     const fencingToken = attempt.revision + 1;
     db.prepare("INSERT INTO execution_permits (attempt_id, fencing_token, state, issued_at, consumed_at) VALUES (?, ?, 'CONSUMED', ?, ?)").run(
       attempt.id,
@@ -137,6 +139,11 @@ export async function executePayment(db: DatabaseSync, input: ExecutePaymentInpu
     return unknown(`the submission failed (${describe(error)})`);
   }
   return { status: "SUBMITTED", attempt: claim.attempt, paymentMandateSha256: claim.paymentMandateSha256 };
+}
+
+/** The digest recorded with SIGNING_REQUESTED; a mandate rebuilt later must match it exactly. */
+export function mandateDigest(payload: ExecutionPayload): string {
+  return sha256Hex(canonicalJson(payload as unknown as CanonicalValue));
 }
 
 function cartMismatches(attempt: PaymentAttemptRecord, cart: ValidatedCart): string[] {

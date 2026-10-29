@@ -1,22 +1,24 @@
 import type { DatabaseSync } from "node:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createSimulatedAdapters, signSimulatedPayload, type GatewayFault, type PaymentRail, type RegistryGateway, type SimulatedAdapters } from "@settleback/adapters";
+import { privateKeyToAccount } from "viem/accounts";
+import { buildEip3009PaymentMandate, createSimulatedAdapters, eip3009TypedData, signSimulatedPayload, type Ap2MandatePayload, type GatewayFault, type PaymentRail, type RegistryGateway, type SimulatedAdapters } from "@settleback/adapters";
 import { REPAYMENT_EVIDENCE_SCHEMA, eligibilityRulesSha256, repaymentEvidenceSha256, type Address } from "@settleback/domain";
 import { getRecoveryAction } from "../../src/db/actions.ts";
 import { getCase, readCaseEvidence } from "../../src/db/cases.ts";
 import { immediateTransaction } from "../../src/db/database.ts";
 import { ingestEvidence } from "../../src/db/evidence.ts";
-import { getPaymentAttempt } from "../../src/db/payments.ts";
+import { getPaymentAttempt, moveAttempt } from "../../src/db/payments.ts";
 import { insertProofAllocation } from "../../src/db/proofs.ts";
 import type { PaymentSigner } from "../../src/payments/execution.ts";
 import { reconcilePending } from "../../src/payments/reconciler.ts";
 import { confirmRepaymentReservation, moveCase, prepareRecovery } from "../../src/recovery/actions.ts";
-import { completeRepayment, liveAttempt, repaymentEvidence, requestRepayment, type RepaymentPayments } from "../../src/recovery/repayment.ts";
+import { completeRepayment, liveAttempt, repaymentEvidence, requestRepayment, requestRepaymentSignature, submitRepaymentSignature, type RepaymentPayments } from "../../src/recovery/repayment.ts";
 import { BUYER, SELLER, TOKEN, memoryDatabase } from "../db/helpers.ts";
 import { startLocalChain, type LocalChain } from "../registry/anvil.ts";
 import { TERMS, registerFixturePolicies, setupFixtureCase, type FixtureCaseSetup } from "./helpers.ts";
 
 const clock = () => new Date();
+const LATE_CLAIM = { submittedBy: "buyer" as const, source: "buyer-claim" as const, mediaType: "text/plain" as const, sourceEventId: "late-claim", content: "Still nothing.", observedAt: null };
 let chain: LocalChain;
 let db: DatabaseSync;
 let sim: SimulatedAdapters;
@@ -310,8 +312,6 @@ describe("per-case repayment", () => {
 });
 
 describe("refusals before anything is paid", () => {
-  const LATE_CLAIM = { submittedBy: "buyer" as const, source: "buyer-claim" as const, mediaType: "text/plain" as const, sourceEventId: "late-claim", content: "Still nothing.", observedAt: null };
-
   it("refuses anyone but the seller, and a repayment that is not reserved", async () => {
     const setup = await setupFixtureCase(db, "refundable-failure-per-case");
     const using = payments();
@@ -443,5 +443,188 @@ describe("refusals before anything is paid", () => {
     };
     expect(await refusal(request(setup, using, { registry: altered }))).toBe("NOT_EXECUTABLE");
     expect(using.calls).toEqual({ sign: 0, submit: 0 });
+  });
+});
+
+describe("repayment signed in the seller's wallet", () => {
+  const sellerAccount = privateKeyToAccount(`0x${"a1".repeat(32)}`);
+  const walletSeller = sellerAccount.address.toLowerCase() as Address;
+
+  async function reservedForWallet(): Promise<{ setup: FixtureCaseSetup; actionId: string }> {
+    const setup = await setupFixtureCase(db, "refundable-failure-per-case", { buyer: BUYER, seller: walletSeller });
+    const prepared = await prepareRecovery(db, { caseId: setup.caseId, requestedBy: { role: "seller", identity: walletSeller }, registry: chain.registry, terms: TERMS, now: clock });
+    if (prepared.sellerCall === null) throw new Error("expected a seller call");
+    const hash = await chain.sendAs(walletSeller, prepared.sellerCall);
+    await chain.mined(hash);
+    expect(await confirmRepaymentReservation(db, { actionId: prepared.action.id, txHash: hash, registry: chain.registry, now: clock })).toMatchObject({ status: "CONFIRMED" });
+    return { setup, actionId: prepared.action.id };
+  }
+
+  /** The simulated rail, counting submissions the gateway accepted. */
+  function acceptingRail(): { using: RepaymentPayments; accepted: () => number } {
+    let accepted = 0;
+    const base = payments();
+    const rail: PaymentRail = {
+      ...base.rail,
+      submit: async (signed) => {
+        await sim.rail.submit(signed);
+        accepted += 1;
+      },
+    };
+    return { using: { ...base, rail }, accepted: () => accepted };
+  }
+
+  function ask(setup: FixtureCaseSetup, using: RepaymentPayments, requestedBy = walletSeller) {
+    return requestRepaymentSignature(db, { caseId: setup.caseId, requestedBy, registry: chain.registry, payments: using, now: clock });
+  }
+
+  function submit(setup: FixtureCaseSetup, using: RepaymentPayments, signature: string, requestedBy = walletSeller) {
+    return submitRepaymentSignature(db, { caseId: setup.caseId, requestedBy, signature, registry: chain.registry, payments: using, now: clock });
+  }
+
+  async function mandateOf(setup: FixtureCaseSetup, using: RepaymentPayments): Promise<Ap2MandatePayload> {
+    const requested = await ask(setup, using);
+    if (requested.status !== "SIGNATURE_REQUIRED") throw new Error(`expected a mandate to sign, got ${requested.status}`);
+    return requested.payload;
+  }
+
+  it("pays the EIP-3009 authorization the seller signed, once, and closes through the registry", async () => {
+    const { setup, actionId } = await reservedForWallet();
+    const { using, accepted } = acceptingRail();
+    const requested = await ask(setup, using);
+    expect(requested).toMatchObject({ status: "SIGNATURE_REQUIRED", action: { state: "EXECUTION_REQUESTED" }, attempt: { state: "SIGNING_REQUESTED" } });
+    const payload = requested.status === "SIGNATURE_REQUIRED" ? requested.payload : undefined;
+    if (payload === undefined) throw new Error("expected a mandate");
+    expect(payload).toMatchObject({ kind: "ap2-eip3009", authorization: { from: walletSeller, to: BUYER, value: "1000000" }, domain: { name: "USD Coin", version: "2", chainId: 133 } });
+    // The authorization lapses with the repayment's cart, two hours after the attempt.
+    const cartExpiry = Date.parse(requested.status === "SIGNATURE_REQUIRED" ? requested.attempt.createdAt : "") + 2 * 60 * 60 * 1000;
+    expect(payload.authorization.validBefore).toBe(String(Math.floor(cartExpiry / 1000)));
+    expect(db.prepare("SELECT count(*) AS n FROM execution_permits").get()?.n).toBe(1);
+
+    expect(await submit(setup, using, await sellerAccount.signTypedData(eip3009TypedData(payload)))).toMatchObject({ status: "SUBMITTED" });
+    ticks(6);
+    await pass();
+    expect(getRecoveryAction(db, actionId)?.state).toBe("COMPLETED");
+    expect(getCase(db, setup.caseId)?.status).toBe("REPAID");
+    const attempt = getPaymentAttempt(db, requested.status === "SIGNATURE_REQUIRED" ? requested.attempt.id : "");
+    expect(sim.paymentChain.getTransfer(attempt?.txHash ?? "")).toMatchObject({ from: walletSeller, to: BUYER, amountBaseUnits: "1000000" });
+    expect(accepted()).toBe(1);
+    expect((await ask(setup, using)).status).toBe("ALREADY_REQUESTED");
+  });
+
+  it("accepts only the seller's signature of exactly the recorded mandate", async () => {
+    const { setup } = await reservedForWallet();
+    const { using, accepted } = acceptingRail();
+    const payload = await mandateOf(setup, using);
+    const wrongSigner = await privateKeyToAccount(`0x${"c3".repeat(32)}`).signTypedData(eip3009TypedData(payload));
+    const otherAmount = await sellerAccount.signTypedData(eip3009TypedData({ ...payload, authorization: { ...payload.authorization, value: "1" } }));
+    for (const signature of [wrongSigner, otherAmount]) expect(await refusal(submit(setup, using, signature))).toBe("MANDATE_SIGNATURE_INVALID");
+    expect(accepted()).toBe(0);
+    expect(await submit(setup, using, await sellerAccount.signTypedData(eip3009TypedData(payload)))).toMatchObject({ status: "SUBMITTED" });
+    expect(accepted()).toBe(1);
+  });
+
+  it("offers the same mandate until it is signed, and lets one of twenty concurrent submissions through", async () => {
+    const { setup } = await reservedForWallet();
+    const { using, accepted } = acceptingRail();
+    const first = await mandateOf(setup, using);
+    expect(await mandateOf(setup, using)).toEqual(first);
+    expect(db.prepare("SELECT count(*) AS n FROM execution_permits").get()?.n).toBe(1);
+    const signature = await sellerAccount.signTypedData(eip3009TypedData(first));
+    const results = await Promise.all(Array.from({ length: 20 }, () => submit(setup, using, signature)));
+    expect(results.filter((result) => result.status === "SUBMITTED")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "ALREADY_REQUESTED")).toHaveLength(19);
+    expect(accepted()).toBe(1);
+    // Once reconciliation has seen the submission, nothing is offered for signing again.
+    await pass();
+    expect((await ask(setup, using)).status).toBe("ALREADY_REQUESTED");
+  });
+
+  it("offers the one mandate to concurrent requests that reach the permit together", async () => {
+    const { setup } = await reservedForWallet();
+    const { using } = acceptingRail();
+    let arrived = 0;
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const rail: PaymentRail = {
+      ...using.rail,
+      prepare: async (input) => {
+        arrived += 1;
+        if (arrived === 10) release();
+        await gate;
+        return using.rail.prepare(input);
+      },
+    };
+    const results = await Promise.all(Array.from({ length: 10 }, () => ask(setup, { ...using, rail })));
+    expect(arrived).toBe(10);
+    const payloads = results.map((result) => (result.status === "SIGNATURE_REQUIRED" ? result.payload : undefined));
+    expect(payloads.every((payload) => payload !== undefined && JSON.stringify(payload) === JSON.stringify(payloads[0]))).toBe(true);
+    expect(db.prepare("SELECT count(*) AS n FROM execution_permits").get()?.n).toBe(1);
+  });
+
+  it("does not submit a signature for an attempt reconciliation has frozen", async () => {
+    const { setup } = await reservedForWallet();
+    const { using, accepted } = acceptingRail();
+    const requested = await ask(setup, using);
+    if (requested.status !== "SIGNATURE_REQUIRED") throw new Error("expected a mandate");
+    immediateTransaction(db, () =>
+      moveAttempt(db, requested.attempt, { to: "UNKNOWN", actor: "reconciler", actorLabel: "reconciler", eventType: "PAYMENT_UNKNOWN", payloadSha256: "0".repeat(64), now: new Date().toISOString() }),
+    );
+    expect(await submit(setup, using, await sellerAccount.signTypedData(eip3009TypedData(requested.payload)))).toMatchObject({ status: "ALREADY_REQUESTED", attempt: { state: "UNKNOWN" } });
+    expect(accepted()).toBe(0);
+    expect((await sim.rail.observe(requested.attempt.paymentRequestId ?? "")).record.status).toBe("payment-required");
+  });
+
+  it("refuses a signature for a repayment whose claim was refused", async () => {
+    const { setup, actionId } = await reservedForWallet();
+    const { using, accepted } = acceptingRail();
+    const rail: PaymentRail = {
+      ...using.rail,
+      prepare: async (input) => {
+        ingestEvidence(db, { ...LATE_CLAIM, operationId: setup.operationId, now: new Date().toISOString() });
+        return using.rail.prepare(input);
+      },
+    };
+    expect(await refusal(ask(setup, { ...using, rail }))).toBe("NOT_EXECUTABLE");
+    const action = getRecoveryAction(db, actionId);
+    expect(action === undefined ? undefined : liveAttempt(db, action)?.state).toBe("PREPARED");
+    expect(await refusal(submit(setup, using, `0x${"11".repeat(65)}`))).toBe("WRONG_ACTION_STATE");
+    expect(accepted()).toBe(0);
+  });
+
+  it("refuses a signature before the mandate was requested, and anyone but the seller", async () => {
+    const { setup } = await reservedForWallet();
+    const { using, accepted } = acceptingRail();
+    expect(await refusal(submit(setup, using, `0x${"11".repeat(65)}`))).toBe("WRONG_ACTION_STATE");
+    expect(await refusal(ask(setup, using, BUYER))).toBe("ROLE_FORBIDDEN");
+    const payload = await mandateOf(setup, using);
+    expect(await refusal(ask(setup, using, BUYER))).toBe("ROLE_FORBIDDEN");
+    expect(await refusal(submit(setup, using, await sellerAccount.signTypedData(eip3009TypedData(payload)), BUYER))).toBe("ROLE_FORBIDDEN");
+    expect(accepted()).toBe(0);
+  });
+
+  it("does not offer a wallet a mandate that was claimed for a server-side signer", async () => {
+    const { setup } = await reservedForWallet();
+    const using = payments();
+    expect((await requestRepayment(db, { caseId: setup.caseId, requestedBy: walletSeller, registry: chain.registry, payments: using, now: clock })).status).toBe("SUBMITTED");
+    expect(await ask(setup, using)).toMatchObject({ status: "ALREADY_REQUESTED" });
+    // A wallet signature cannot be attached to a mandate the attempt did not record.
+    const foreign = buildEip3009PaymentMandate({
+      provenance: "SIMULATED",
+      cartMandateId: "cart-x",
+      paymentRequestId: "pr-x",
+      cartSha256: "0".repeat(64),
+      payer: walletSeller,
+      payee: BUYER as Address,
+      chainId: 133,
+      token: TOKEN as Address,
+      amountBaseUnits: "1000000",
+      totalUsd: "1.00",
+      cartExpiry: new Date(Date.now() + 60_000).toISOString(),
+      merchantName: "SettleBack Demo Seller",
+      issuedAt: new Date().toISOString(),
+    });
+    expect(await refusal(submit(setup, using, await sellerAccount.signTypedData(eip3009TypedData(foreign))))).toBe("ACTION_INTEGRITY");
+    expect(using.calls).toEqual({ sign: 1, submit: 1 });
   });
 });

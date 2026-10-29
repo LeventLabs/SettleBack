@@ -58,6 +58,21 @@ export async function signMessage(account: WalletAccount, message: string): Prom
   return String(await provider().request({ method: "personal_sign", params: [hex, account.address] }));
 }
 
+/** Asks the wallet to switch networks; wallets refuse typed data whose domain names another chain. */
+export async function switchChain(chainId: number): Promise<void> {
+  try {
+    await provider().request({ method: "wallet_switchEthereumChain", params: [{ chainId: `0x${chainId.toString(16)}` }] });
+  } catch (error) {
+    if ((error as { code?: number }).code === 4902) throw new Error(`Add chain ${chainId} to your wallet, then try again.`);
+    throw error;
+  }
+}
+
+/** EIP-712 signature (eth_signTypedData_v4) of typed data the server prepared; the wallet shows its fields before signing. */
+export async function signTypedData(account: WalletAccount, typedData: unknown): Promise<string> {
+  return String(await provider().request({ method: "eth_signTypedData_v4", params: [account.address, JSON.stringify(typedData)] }));
+}
+
 /** Sends a call the server prepared; the wallet shows the recipient and data before the user approves. */
 export async function sendTransaction(account: WalletAccount, call: { chainId: number; to: string; data: string }): Promise<string> {
   if (account.chainId !== call.chainId) throw new Error(`Switch the wallet to chain ${call.chainId} before approving; it is on chain ${account.chainId}.`);

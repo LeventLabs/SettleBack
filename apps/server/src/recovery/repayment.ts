@@ -4,14 +4,10 @@ import {
   RegistryOutcomeUnknownError,
   RegistryRevertError,
   assertProvenanceAllowed,
-  buildEip3009PaymentMandate,
-  submitPaymentMandate,
   validateCartMandate,
-  verifyEip3009Signature,
   type Ap2MandatePayload,
   type PaymentRail,
   type PinnedMerchant,
-  type Provenance,
   type RegistryCase,
   type RegistryGateway,
   type RegistryWrite,
@@ -27,7 +23,8 @@ import { getOperation, type OperationRecord } from "../db/operations.ts";
 import { getPaymentAttempt, type PaymentAttemptRecord } from "../db/payments.ts";
 import { insertProofAllocation } from "../db/proofs.ts";
 import { ExecutionRefusedError, claimExecution, executePayment, mandateDigest, type PaymentSigner } from "../payments/execution.ts";
-import { CART_LIFETIME_MS, markPrepared } from "../payments/quote.ts";
+import { markPrepared } from "../payments/quote.ts";
+import { attemptMandate, cartExpiryOf, submitWalletSignature } from "../payments/wallet-signing.ts";
 import { freshness, moveCase, registrationTerms, requireRegistry, termsMismatch } from "./actions.ts";
 import type { OutcomeRecording } from "./retrieval.ts";
 
@@ -252,7 +249,7 @@ export async function requestRepaymentSignature(db: DatabaseSync, input: Request
       provenances: [provenance],
       now: input.now().toISOString(),
       onClaim: claimReservation(action, operation, input.now),
-      mandate: (_cart, current) => repaymentMandate(current, operation, merchantName, provenance),
+      mandate: (_cart, current) => attemptMandate(current, operation.priceUsd, merchantName, provenance),
     });
     if (claim.payload.kind !== "ap2-eip3009") throw new Error("expected an AP2 mandate");
     return { status: "SIGNATURE_REQUIRED", action: reread(db, action.id), attempt: claim.attempt, payload: claim.payload };
@@ -292,45 +289,12 @@ export async function submitRepaymentSignature(
     throw new RecoveryRefusedError("WRONG_ACTION_STATE", "Request the repayment mandate before signing it.");
   }
   if (attempt.state !== "SIGNING_REQUESTED") return { status: "ALREADY_REQUESTED", action, attempt };
-  const provenance = input.payments.rail.provenance;
-  const payload = repaymentMandate(attempt, operation, input.payments.merchant.merchantName, provenance);
-  if (mandateDigest(payload) !== attempt.paymentMandateSha256) throw new ActionIntegrityError(`repayment attempt ${attempt.id} no longer matches the mandate recorded with its permit`);
-  if (!(await verifyEip3009Signature(payload, input.signature))) {
-    throw new RecoveryRefusedError("MANDATE_SIGNATURE_INVALID", "The signature is not the seller's signature of this repayment's authorization.");
-  }
-  try {
-    const submission = await submitPaymentMandate(input.payments.rail, { payload, signature: input.signature });
-    const after = reread(db, action.id);
-    return submission === "SUBMITTED"
-      ? { status: "SUBMITTED", action: after, attempt }
-      : { status: "OUTCOME_UNKNOWN", action: after, attempt, reason: "the submission response was lost and the gateway shows no payment yet" };
-  } catch (error) {
-    // Refused because another submission of the same authorization got there first: that is the repayment.
-    if (attempt.paymentRequestId !== null && (await gatewayMovedOn(input.payments.rail, attempt.paymentRequestId))) return alreadyRequested(db, action.id);
-    return { status: "OUTCOME_UNKNOWN", action: reread(db, action.id), attempt, reason: `the gateway did not accept the submission (${describe(error)})` };
-  }
-}
-
-/** The mandate a repayment's payer signs, rebuilt only from what the attempt and the operation fix. */
-export function repaymentMandate(attempt: PaymentAttemptRecord, operation: OperationRecord, merchantName: string, provenance: Provenance): Ap2MandatePayload {
-  if (attempt.cartMandateId === null || attempt.paymentRequestId === null || attempt.cartSha256 === null) {
-    throw new ActionIntegrityError(`repayment attempt ${attempt.id} has no prepared cart`);
-  }
-  return buildEip3009PaymentMandate({
-    provenance,
-    cartMandateId: attempt.cartMandateId,
-    paymentRequestId: attempt.paymentRequestId,
-    cartSha256: attempt.cartSha256,
-    payer: attempt.payer,
-    payee: attempt.payee,
-    chainId: attempt.chainId,
-    token: attempt.token,
-    amountBaseUnits: attempt.amountBaseUnits,
-    totalUsd: operation.priceUsd,
-    cartExpiry: cartExpiryOf(attempt),
-    merchantName,
-    issuedAt: attempt.createdAt,
-  });
+  const payload = attemptMandate(attempt, operation.priceUsd, input.payments.merchant.merchantName, input.payments.rail.provenance);
+  const outcome = await submitWalletSignature(attempt, payload, input.signature, input.payments.rail);
+  // Refused because another submission of the same authorization got there first: that is the repayment.
+  if (outcome.status === "ALREADY_REQUESTED") return alreadyRequested(db, action.id);
+  const after = reread(db, action.id);
+  return outcome.status === "SUBMITTED" ? { status: "SUBMITTED", action: after, attempt } : { status: "OUTCOME_UNKNOWN", action: after, attempt, reason: outcome.reason };
 }
 
 /** A repayment whose permit is consumed but whose signature has not been submitted: offer the same mandate again. */
@@ -344,7 +308,7 @@ function awaitingSignature(db: DatabaseSync, input: RequestRepaymentInput): Repa
     return attempt?.state === "SIGNING_REQUESTED" ? { action, operation, attempt } : undefined;
   });
   if (found === undefined) return undefined;
-  const payload = repaymentMandate(found.attempt, found.operation, input.payments.merchant.merchantName, input.payments.rail.provenance);
+  const payload = attemptMandate(found.attempt, found.operation.priceUsd, input.payments.merchant.merchantName, input.payments.rail.provenance);
   if (mandateDigest(payload) !== found.attempt.paymentMandateSha256) {
     // A mandate of another kind (for example a server-side signer's) was claimed; it is not offered to a wallet.
     return { status: "ALREADY_REQUESTED", action: found.action, attempt: found.attempt };
@@ -352,17 +316,6 @@ function awaitingSignature(db: DatabaseSync, input: RequestRepaymentInput): Repa
   return { status: "SIGNATURE_REQUIRED", action: found.action, attempt: found.attempt, payload };
 }
 
-async function gatewayMovedOn(rail: PaymentRail, paymentRequestId: string): Promise<boolean> {
-  try {
-    return (await rail.observe(paymentRequestId)).record.status !== "payment-required";
-  } catch {
-    return false;
-  }
-}
-
-function cartExpiryOf(attempt: PaymentAttemptRecord): string {
-  return new Date(Date.parse(attempt.createdAt) + CART_LIFETIME_MS).toISOString();
-}
 
 /**
  * Closes a repayment once the transfer is settled. A verified, final transfer is bound to this

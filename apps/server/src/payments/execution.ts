@@ -15,7 +15,15 @@ import { StoreError } from "../db/errors.ts";
 import { getOperation } from "../db/operations.ts";
 import { getPaymentAttempt, moveAttempt, type PaymentAttemptRecord } from "../db/payments.ts";
 
-export type ExecutionRefusal = "ATTEMPT_NOT_FOUND" | "ROLE_FORBIDDEN" | "PERMIT_CONSUMED" | "ATTEMPT_NOT_EXECUTABLE" | "CART_MISMATCH" | "MANDATE_FORMAT_UNAVAILABLE";
+export type ExecutionRefusal =
+  | "ATTEMPT_NOT_FOUND"
+  | "ROLE_FORBIDDEN"
+  | "PERMIT_CONSUMED"
+  | "ATTEMPT_NOT_EXECUTABLE"
+  | "CART_MISMATCH"
+  | "MANDATE_FORMAT_UNAVAILABLE"
+  | "MANDATE_SIGNATURE_INVALID"
+  | "CART_REJECTED";
 
 /** A payment execution refused before its permit was consumed: nothing was signed or sent. */
 export class ExecutionRefusedError extends StoreError {

@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   BaseError,
   ContractFunctionRevertedError,
+  NonceTooLowError,
   TransactionNotFoundError,
   TransactionReceiptNotFoundError,
   WaitForTransactionReceiptTimeoutError,
@@ -59,9 +61,16 @@ export interface EvmRegistryOptions {
   /** Blocks a receipt needs before a write or a reservation counts as confirmed. */
   confirmations: number;
   timeoutMs: number;
+  /** How often to poll for new blocks and receipts, and to ask a lagging RPC node again; tests shorten it. */
+  pollMs?: number;
   /** Test seam; defaults to HTTP. */
   transport?: Transport;
 }
+
+/** Times a transaction the RPC does not know is looked up before it is reported as unknown to the chain. */
+const UNKNOWN_TRANSACTION_CHECKS = 4;
+/** Sends tried with the next nonce when a lagging node reported an old one. */
+const NONCE_ATTEMPTS = 3;
 
 export class RegistryConfigurationError extends Error {
   constructor(message: string) {
@@ -89,6 +98,11 @@ export class EvmRegistryGateway implements RegistryGateway {
   private readonly timeoutMs: number;
   // Writes from the one verifier account go out one at a time, so concurrent calls cannot pick the same nonce.
   private writes: Promise<unknown> = Promise.resolve();
+  // The highest block holding a write or a reservation this gateway relied on. Reads and simulations
+  // are pinned at or above it, so a node lagging behind a load-balanced RPC cannot answer with older
+  // state. A disposable local chain never lags, so there this changes nothing.
+  private floor = 0n;
+  private readonly pollMs: number;
 
   private constructor(options: EvmRegistryOptions, chain: Chain) {
     this.provenance = options.provenance;
@@ -96,8 +110,9 @@ export class EvmRegistryGateway implements RegistryGateway {
     this.address = getAddress(options.address) as Address;
     this.confirmations = options.confirmations;
     this.timeoutMs = options.timeoutMs;
+    this.pollMs = options.pollMs ?? 1_000;
     const transport = options.transport ?? http(options.rpcUrl, { timeout: options.timeoutMs, retryCount: 0 });
-    this.client = createPublicClient({ chain, transport });
+    this.client = createPublicClient({ chain, transport, pollingInterval: this.pollMs });
     this.account = options.verifierPrivateKey === undefined ? undefined : privateKeyToAccount(options.verifierPrivateKey);
     this.wallet = this.account === undefined ? undefined : createWalletClient({ account: this.account, chain, transport });
   }
@@ -125,7 +140,8 @@ export class EvmRegistryGateway implements RegistryGateway {
   }
 
   async readCase(caseKey: string): Promise<RegistryCase | undefined> {
-    const record = await this.client.readContract({ address: this.address, abi: RECOVERY_REGISTRY_ABI, functionName: "getCase", args: [bytes32(caseKey, "case key")] });
+    const key = bytes32(caseKey, "case key");
+    const record = await this.pinned((at) => this.client.readContract({ ...at, address: this.address, abi: RECOVERY_REGISTRY_ABI, functionName: "getCase", args: [key] }));
     const state = CASE_STATES[record.state];
     if (state === undefined) return undefined;
     const t = record.terms;
@@ -152,7 +168,8 @@ export class EvmRegistryGateway implements RegistryGateway {
   }
 
   async readPolicy(authorizationId: number): Promise<RegistryPolicy | undefined> {
-    const policy = await this.client.readContract({ address: this.address, abi: RECOVERY_REGISTRY_ABI, functionName: "getPolicy", args: [uint64(authorizationId)] });
+    const id = uint64(authorizationId);
+    const policy = await this.pinned((at) => this.client.readContract({ ...at, address: this.address, abi: RECOVERY_REGISTRY_ABI, functionName: "getPolicy", args: [id] }));
     const status = POLICY_STATUSES[policy.status];
     if (status === undefined) return undefined;
     const t = policy.terms;
@@ -177,18 +194,21 @@ export class EvmRegistryGateway implements RegistryGateway {
 
   async activePolicyId(seller: Address, paymentChainId: number, token: Address): Promise<number> {
     const scope = await this.scope(seller, paymentChainId, token);
-    return Number(await this.client.readContract({ address: this.address, abi: RECOVERY_REGISTRY_ABI, functionName: "activePolicyOf", args: [scope] }));
+    return Number(await this.pinned((at) => this.client.readContract({ ...at, address: this.address, abi: RECOVERY_REGISTRY_ABI, functionName: "activePolicyOf", args: [scope] })));
   }
 
   async readBudget(seller: Address, paymentChainId: number, token: Address, day?: number): Promise<RegistryBudget> {
     const scope = await this.scope(seller, paymentChainId, token);
-    const which = day ?? Number(await this.client.readContract({ address: this.address, abi: RECOVERY_REGISTRY_ABI, functionName: "currentDay" }));
-    const [booked, outstanding] = await this.client.readContract({
-      address: this.address,
-      abi: RECOVERY_REGISTRY_ABI,
-      functionName: "getBudget",
-      args: [scope, BigInt(which)],
-    });
+    const which = day ?? Number(await this.pinned((at) => this.client.readContract({ ...at, address: this.address, abi: RECOVERY_REGISTRY_ABI, functionName: "currentDay" })));
+    const [booked, outstanding] = await this.pinned((at) =>
+      this.client.readContract({
+        ...at,
+        address: this.address,
+        abi: RECOVERY_REGISTRY_ABI,
+        functionName: "getBudget",
+        args: [scope, BigInt(which)],
+      }),
+    );
     return { scope, day: which, bookedOnDayBaseUnits: booked.toString(), outstandingBaseUnits: outstanding.toString() };
   }
 
@@ -286,24 +306,28 @@ export class EvmRegistryGateway implements RegistryGateway {
       return { status: "REJECTED", reason: "a standing-policy reservation needs its authorization ID" };
     }
 
-    let receipt: Awaited<ReturnType<PublicClient["getTransactionReceipt"]>>;
-    try {
-      receipt = await this.client.getTransactionReceipt({ hash });
-    } catch (error) {
-      if (!(error instanceof TransactionReceiptNotFoundError)) throw error;
+    let receipt: Awaited<ReturnType<PublicClient["getTransactionReceipt"]>> | undefined;
+    for (let check = 1; receipt === undefined; check += 1) {
       try {
-        await this.client.getTransaction({ hash });
-        return { status: "PENDING", reason: "the transaction is not mined yet" };
-      } catch (inner) {
-        if (inner instanceof TransactionNotFoundError) return { status: "REJECTED", reason: "the chain does not know this transaction" };
-        throw inner;
+        receipt = await this.client.getTransactionReceipt({ hash });
+      } catch (error) {
+        if (!(error instanceof TransactionReceiptNotFoundError)) throw error;
+        try {
+          await this.client.getTransaction({ hash });
+          return { status: "PENDING", reason: "the transaction is not mined yet" };
+        } catch (inner) {
+          if (!(inner instanceof TransactionNotFoundError)) throw inner;
+          // A transaction sent a moment ago may not have reached the node that answered yet.
+          if (check >= UNKNOWN_TRANSACTION_CHECKS) return { status: "REJECTED", reason: "the chain does not know this transaction" };
+          await sleep(this.pollMs);
+        }
       }
     }
     if (receipt.status !== "success") return { status: "REJECTED", reason: "the transaction reverted" };
 
-    const tx = await this.client.getTransaction({ hash });
-    if (tx.to === null || tx.to.toLowerCase() !== this.address.toLowerCase()) return { status: "REJECTED", reason: "the transaction is not a call to this registry" };
-    if (tx.from.toLowerCase() !== expected.reservedBy.toLowerCase()) return { status: "REJECTED", reason: "the transaction was sent by another account" };
+    // The receipt names the sender and recipient; a second lookup could reach a node that lacks the transaction.
+    if (receipt.to === null || receipt.to.toLowerCase() !== this.address.toLowerCase()) return { status: "REJECTED", reason: "the transaction is not a call to this registry" };
+    if (receipt.from.toLowerCase() !== expected.reservedBy.toLowerCase()) return { status: "REJECTED", reason: "the transaction was sent by another account" };
 
     const events = parseEventLogs({ abi: RECOVERY_REGISTRY_ABI, logs: receipt.logs, eventName: "RepaymentReserved" }).filter(
       (log) => log.address.toLowerCase() === this.address.toLowerCase() && log.args.caseKey.toLowerCase() === caseKey,
@@ -321,6 +345,7 @@ export class EvmRegistryGateway implements RegistryGateway {
     const confirmations = Number(head - receipt.blockNumber) + 1;
     if (confirmations < this.confirmations) return { status: "PENDING", reason: `${confirmations} of ${this.confirmations} confirmations` };
 
+    this.raiseFloor(receipt.blockNumber);
     const current = await this.readCase(caseKey);
     if (current === undefined || (current.state !== "RESERVED_REPAY" && current.state !== "REPAID") || current.mode !== expected.mode) {
       return { status: "REJECTED", reason: "the registry no longer records this reservation" };
@@ -339,12 +364,34 @@ export class EvmRegistryGateway implements RegistryGateway {
   }
 
   private async scope(seller: Address, paymentChainId: number, token: Address): Promise<Hex> {
-    return this.client.readContract({
-      address: this.address,
-      abi: RECOVERY_REGISTRY_ABI,
-      functionName: "scopeOf",
-      args: [getAddress(seller), uint64(paymentChainId), getAddress(token)],
-    });
+    const args = [getAddress(seller), uint64(paymentChainId), getAddress(token)] as const;
+    return this.pinned((at) => this.client.readContract({ ...at, address: this.address, abi: RECOVERY_REGISTRY_ABI, functionName: "scopeOf", args }));
+  }
+
+  private raiseFloor(blockNumber: bigint): void {
+    if (blockNumber > this.floor) this.floor = blockNumber;
+  }
+
+  /**
+   * Runs a read at a block at or above the floor. A node that has not reached the floor, or that
+   * does not serve the block another node reported, is asked again until the timeout. A contract
+   * revert is an answer, not lag, and is passed on at once.
+   */
+  private async pinned<T>(read: (at: { blockNumber?: bigint }) => Promise<T>): Promise<T> {
+    if (this.floor === 0n) return read({});
+    const deadline = Date.now() + this.timeoutMs;
+    for (;;) {
+      let failure: unknown = new BaseError(`The registry RPC has not reached block ${this.floor} yet.`);
+      try {
+        const head = await this.client.getBlockNumber({ cacheTime: 0 });
+        if (head >= this.floor) return await read({ blockNumber: head });
+      } catch (error) {
+        if (revertOf(error) instanceof RegistryRevertError) throw error;
+        failure = error;
+      }
+      if (Date.now() >= deadline) throw failure;
+      await sleep(this.pollMs);
+    }
   }
 
   private call(data: Hex): WalletCall {
@@ -365,22 +412,48 @@ export class EvmRegistryGateway implements RegistryGateway {
 
   private async send<F extends WriteFunction>(functionName: F, args: readonly unknown[]): Promise<RegistryWrite> {
     if (this.wallet === undefined || this.account === undefined) throw new RegistryConfigurationError("no verifier key is configured for registry writes");
+    const account = this.account;
     let request;
     try {
-      ({ request } = await this.client.simulateContract({
-        account: this.account,
-        address: this.address,
-        abi: RECOVERY_REGISTRY_ABI,
-        functionName,
-        args: args as never,
-      }));
+      ({ request } = await this.pinned((at) =>
+        this.client.simulateContract({
+          ...at,
+          account,
+          address: this.address,
+          abi: RECOVERY_REGISTRY_ABI,
+          functionName,
+          args: args as never,
+        }),
+      ));
     } catch (error) {
       throw revertOf(error);
     }
-    const txHash = await this.wallet.writeContract(request as never);
+    // The simulation's block pin is not part of the transaction. Gas is estimated at the same pinned
+    // block, with headroom, and every field is given explicitly, so viem neither re-estimates nor
+    // fills the transaction (eth_fillTransaction) against a node that has not seen that state.
+    const { blockNumber: _simulatedAt, ...transaction } = request as typeof request & { blockNumber?: bigint };
+    const estimated = await this.pinned((at) =>
+      this.client.estimateContractGas({ ...at, account, address: this.address, abi: RECOVERY_REGISTRY_ABI, functionName, args: args as never }),
+    );
+    const gas = (estimated * 5n) / 4n;
+    const { maxFeePerGas, maxPriorityFeePerGas } = await this.client.estimateFeesPerGas();
+    let nonce = await this.client.getTransactionCount({ address: account.address, blockTag: "pending" });
+    let txHash: Hex | undefined;
+    for (let attempt = 1; txHash === undefined; attempt += 1) {
+      try {
+        txHash = await this.wallet.writeContract({ ...transaction, chainId: this.chainId, gas, nonce, maxFeePerGas, maxPriorityFeePerGas } as never);
+      } catch (error) {
+        // A lagging node reported fewer transactions than the account has sent. viem files "already
+        // known" under the same error; that transaction was received, so it is never sent again.
+        const tooLow = error instanceof BaseError && error.walk((cause) => cause instanceof NonceTooLowError) instanceof NonceTooLowError && /nonce too low/i.test(error.message);
+        if (attempt >= NONCE_ATTEMPTS || !tooLow) throw error;
+        nonce += 1;
+      }
+    }
     try {
       const receipt = await this.client.waitForTransactionReceipt({ hash: txHash, confirmations: this.confirmations, timeout: this.timeoutMs });
       if (receipt.status !== "success") throw new RegistryRevertError("RevertedOnChain");
+      this.raiseFloor(receipt.blockNumber);
       return { txHash, blockNumber: Number(receipt.blockNumber) };
     } catch (error) {
       if (error instanceof WaitForTransactionReceiptTimeoutError) {

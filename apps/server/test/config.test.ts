@@ -117,7 +117,7 @@ describe("loadConfig", () => {
   it("runs the fixture demo only locally, in memory, for two distinct accounts", () => {
     const parties = { SETTLEBACK_DEMO_BUYER: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", SETTLEBACK_DEMO_SELLER: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" };
     const demo = loadConfig({ SETTLEBACK_DEMO: "fixtures", ...parties });
-    expect(demo.demo).toEqual({ buyer: parties.SETTLEBACK_DEMO_BUYER.toLowerCase(), seller: parties.SETTLEBACK_DEMO_SELLER.toLowerCase() });
+    expect(demo.demo).toEqual({ buyer: parties.SETTLEBACK_DEMO_BUYER.toLowerCase(), seller: parties.SETTLEBACK_DEMO_SELLER.toLowerCase(), registry: "local" });
     expect(demo.databasePath).toBe(":memory:");
     expect(() => loadConfig({ SETTLEBACK_DEMO: "fixtures" })).toThrow(/SETTLEBACK_DEMO_BUYER/);
     expect(() => loadConfig({ SETTLEBACK_DEMO: "fixtures", ...parties, SETTLEBACK_DEMO_SELLER: parties.SETTLEBACK_DEMO_BUYER.toLowerCase() })).toThrow(/different accounts/);
@@ -125,6 +125,24 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ SETTLEBACK_DEMO: "everything", ...parties })).toThrow(/SETTLEBACK_DEMO must be/);
     expect(() => loadConfig({ SETTLEBACK_ENV: "testnet", SETTLEBACK_WEB_ORIGIN: "https://settleback.xyz", SETTLEBACK_DEMO: "fixtures", ...parties })).toThrow(/only to the local environment/);
     expect(() => loadConfig(parties)).toThrow(/apply only with SETTLEBACK_DEMO/);
+  });
+
+  it("points the fixture demo at HSK Chain testnet only explicitly, over HTTPS, on chain 133", () => {
+    const parties = { SETTLEBACK_DEMO: "fixtures", SETTLEBACK_DEMO_BUYER: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", SETTLEBACK_DEMO_SELLER: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" };
+    const registry = { SETTLEBACK_REGISTRY_RPC_URL: "https://testnet.hsk.xyz", SETTLEBACK_REGISTRY_CHAIN_ID: "133", SETTLEBACK_REGISTRY_ADDRESS: "0xf1F8FD66A678693C1Ff02611c285ba105562de34" };
+    const demo = loadConfig({ ...parties, ...registry, SETTLEBACK_DEMO_REGISTRY: "hsk-testnet" });
+    expect(demo.demo?.registry).toBe("hsk-testnet");
+    expect(demo.environment).toBe("local");
+    expect(demo.registry).toMatchObject({ chainId: 133, confirmations: 3 });
+    // Without the explicit switch the local environment still refuses HSK Chain, demo or not.
+    expect(() => loadConfig({ ...parties, ...registry })).toThrow(/never HSK Chain/);
+    expect(() => loadConfig(registry)).toThrow(/never HSK Chain/);
+    expect(() => loadConfig({ ...parties, ...registry, SETTLEBACK_DEMO_REGISTRY: "hsk-testnet", SETTLEBACK_REGISTRY_CHAIN_ID: "177" })).toThrow(/HSK Chain testnet \(133\), not chain 177/);
+    expect(() => loadConfig({ ...parties, ...registry, SETTLEBACK_DEMO_REGISTRY: "hsk-testnet", SETTLEBACK_REGISTRY_CHAIN_ID: "31337" })).toThrow(/not chain 31337/);
+    expect(() => loadConfig({ ...parties, ...registry, SETTLEBACK_DEMO_REGISTRY: "hsk-testnet", SETTLEBACK_REGISTRY_RPC_URL: "http://testnet.hsk.xyz" })).toThrow(/HTTPS/);
+    expect(() => loadConfig({ ...parties, SETTLEBACK_DEMO_REGISTRY: "hsk-testnet" })).toThrow(/needs the demo registry/);
+    expect(() => loadConfig({ ...parties, ...registry, SETTLEBACK_DEMO_REGISTRY: "mainnet" })).toThrow(/SETTLEBACK_DEMO_REGISTRY must be/);
+    expect(() => loadConfig({ ...registry, SETTLEBACK_DEMO_REGISTRY: "hsk-testnet" })).toThrow(/apply only with SETTLEBACK_DEMO/);
   });
 
   it("keeps the verifier key out of JSON and error messages", () => {

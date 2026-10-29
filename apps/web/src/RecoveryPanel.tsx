@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, retrieveResult, type DeliveredResult } from "./api.ts";
 import type { Runner } from "./CaseWorkspace.tsx";
-import { actionLabel, short, stateLabel, toneOf, when } from "./format.ts";
+import { actionLabel, explorerLink, short, stateLabel, toneOf, when } from "./format.ts";
 import type { ActionView, CaseView } from "./types.ts";
 import { sendTransaction, signTypedData, switchChain, type WalletAccount } from "./wallet.ts";
 
@@ -112,6 +112,14 @@ function Terms({ data, action }: { data: CaseView; action: ActionView }) {
         <dt>Registry case</dt>
         <dd>
           {short(proposal.caseKey)} on chain {proposal.registry.chainId}
+          {explorerLink(proposal.registry.chainId, "address", proposal.registry.address) !== null && (
+            <>
+              {" "}
+              <a href={explorerLink(proposal.registry.chainId, "address", proposal.registry.address) ?? undefined} target="_blank" rel="noreferrer">
+                Registry on explorer
+              </a>
+            </>
+          )}
         </dd>
       </div>
     </dl>
@@ -290,20 +298,31 @@ function NextStep({ data, action, wallet, runner, isSeller }: { data: CaseView; 
   return <p className="chip chip--done">Recovered and recorded on the registry.</p>;
 }
 
+/** Registry transactions link to the explorer when the registry is on HSK Chain; the simulated transfer never does. */
 function References({ data, action }: { data: CaseView; action: ActionView }) {
-  const rows: [string, string][] = [];
-  if (action.approvalTx !== null) rows.push([action.action === "RETRIEVE" ? "Verifier's reservation" : "Seller's reservation", action.approvalTx]);
-  if (action.policyTx !== null) rows.push(["Delegate's reservation", action.policyTx]);
-  if (data.repayment?.txHash) rows.push(["Repayment transfer (simulated chain)", data.repayment.txHash]);
-  if (action.registryTx !== null) rows.push(["Registry outcome", action.registryTx]);
+  const registryChain = action.proposal.registry.chainId;
+  const rows: { label: string; value: string; link: string | null }[] = [];
+  const registryRow = (label: string, value: string) => rows.push({ label, value, link: explorerLink(registryChain, "tx", value) });
+  if (action.approvalTx !== null) registryRow(action.action === "RETRIEVE" ? "Verifier's reservation" : "Seller's reservation", action.approvalTx);
+  if (action.policyTx !== null) registryRow("Delegate's reservation", action.policyTx);
+  if (data.repayment?.txHash) rows.push({ label: "Repayment transfer (simulated chain)", value: data.repayment.txHash, link: null });
+  if (action.registryTx !== null) registryRow("Registry outcome", action.registryTx);
   if (rows.length === 0) return null;
   return (
     <dl className="facts facts--stacked references">
-      {rows.map(([label, value]) => (
+      {rows.map(({ label, value, link }) => (
         <div key={label}>
           <dt>{label}</dt>
           <dd>
             <code title={value}>{short(value, 10)}</code>
+            {link !== null && (
+              <>
+                {" "}
+                <a href={link} target="_blank" rel="noreferrer">
+                  View on explorer
+                </a>
+              </>
+            )}
           </dd>
         </div>
       ))}

@@ -64,7 +64,11 @@ export interface DemoConfig {
   /** The fixture operations' buyer and seller: accounts the person running the demo can sign in with. */
   buyer: `0x${string}`;
   seller: `0x${string}`;
+  /** Where the demo's registry runs: a disposable local chain, or the demo registry on HSK Chain testnet. */
+  registry: DemoRegistry;
 }
+
+export type DemoRegistry = "local" | "hsk-testnet";
 
 export interface AuthConfig {
   /** The only origin writes are accepted from, and the domain and URI wallets are asked to sign in to. */
@@ -117,7 +121,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       timeoutMs: parseBoundedInteger("SETTLEBACK_ASSESSMENT_TIMEOUT_MS", env.SETTLEBACK_ASSESSMENT_TIMEOUT_MS ?? "45000", 5000, 120000),
       apiKey: parseApiKey(env.ANTHROPIC_API_KEY),
     },
-    registry: parseRegistry(env, environment, env.SETTLEBACK_SIM_PROFILE === undefined ? "testnet" : parseNetworkProfile(env.SETTLEBACK_SIM_PROFILE)),
+    registry: parseRegistry(env, environment, env.SETTLEBACK_SIM_PROFILE === undefined ? "testnet" : parseNetworkProfile(env.SETTLEBACK_SIM_PROFILE), demo?.registry),
     auth: { webOrigin: parseWebOrigin(env.SETTLEBACK_WEB_ORIGIN, environment), operators: parseOperators(env.SETTLEBACK_OPERATORS ?? "") },
     demo,
   };
@@ -127,8 +131,11 @@ function parseDemo(env: NodeJS.ProcessEnv, environment: Environment): DemoConfig
   const mode = env.SETTLEBACK_DEMO ?? "";
   const buyer = env.SETTLEBACK_DEMO_BUYER ?? "";
   const seller = env.SETTLEBACK_DEMO_SELLER ?? "";
+  const registry = env.SETTLEBACK_DEMO_REGISTRY ?? "";
   if (mode === "") {
-    if (buyer !== "" || seller !== "") throw new Error("SETTLEBACK_DEMO_BUYER and SETTLEBACK_DEMO_SELLER apply only with SETTLEBACK_DEMO=fixtures.");
+    if (buyer !== "" || seller !== "" || registry !== "") {
+      throw new Error("SETTLEBACK_DEMO_BUYER, SETTLEBACK_DEMO_SELLER, and SETTLEBACK_DEMO_REGISTRY apply only with SETTLEBACK_DEMO=fixtures.");
+    }
     return undefined;
   }
   if (mode !== "fixtures") throw new Error(`SETTLEBACK_DEMO must be "fixtures" or unset, got "${mode}".`);
@@ -138,7 +145,8 @@ function parseDemo(env: NodeJS.ProcessEnv, environment: Environment): DemoConfig
     if (!/^0x[0-9a-fA-F]{40}$/.test(value)) throw new Error(`${name} must be the 20-byte hex address of an account you can sign in with, got "${value}".`);
   }
   if (buyer.toLowerCase() === seller.toLowerCase()) throw new Error("SETTLEBACK_DEMO_BUYER and SETTLEBACK_DEMO_SELLER must be different accounts.");
-  return { buyer: buyer.toLowerCase() as `0x${string}`, seller: seller.toLowerCase() as `0x${string}` };
+  if (registry !== "" && registry !== "local" && registry !== "hsk-testnet") throw new Error(`SETTLEBACK_DEMO_REGISTRY must be "local" or "hsk-testnet", got "${registry}".`);
+  return { buyer: buyer.toLowerCase() as `0x${string}`, seller: seller.toLowerCase() as `0x${string}`, registry: registry === "hsk-testnet" ? "hsk-testnet" : "local" };
 }
 
 const LOCAL_WEB_ORIGIN = "http://localhost:5173";
@@ -177,18 +185,26 @@ function parseOperators(value: string): `0x${string}`[] {
 }
 
 const HSK_CHAINS = [133, 177];
+const HSK_TESTNET = 133;
+
+/** A registry on HSK Chain is a live contract, whatever the environment around it simulates. */
+export function isHskChain(chainId: number): boolean {
+  return HSK_CHAINS.includes(chainId);
+}
 
 /**
- * All of RPC URL, chain ID, and address, or none. A local environment may only use a disposable
- * chain, never HSK Chain; a live environment may only use its profile's registry chain, over HTTPS.
+ * All of RPC URL, chain ID, and address, or none. A local environment uses a disposable chain,
+ * never HSK Chain, except that the fixture demo may be pointed explicitly at its own registry on HSK
+ * Chain testnet over HTTPS. A live environment may only use its profile's registry chain, over HTTPS.
  */
-function parseRegistry(env: NodeJS.ProcessEnv, environment: Environment, simulatedProfile: NetworkProfile): RegistryConfig | undefined {
+function parseRegistry(env: NodeJS.ProcessEnv, environment: Environment, simulatedProfile: NetworkProfile, demoRegistry: DemoRegistry | undefined): RegistryConfig | undefined {
   const rpcUrl = env.SETTLEBACK_REGISTRY_RPC_URL;
   const chain = env.SETTLEBACK_REGISTRY_CHAIN_ID;
   const address = env.SETTLEBACK_REGISTRY_ADDRESS;
   const given = [rpcUrl, chain, address].filter((value) => value !== undefined && value !== "");
   if (given.length === 0) {
     if (env.SETTLEBACK_VERIFIER_PRIVATE_KEY) throw new Error("SETTLEBACK_VERIFIER_PRIVATE_KEY is set but no registry is configured.");
+    if (demoRegistry === "hsk-testnet") throw new Error("SETTLEBACK_DEMO_REGISTRY=hsk-testnet needs the demo registry's RPC URL, chain ID, and address.");
     return undefined;
   }
   if (given.length !== 3 || rpcUrl === undefined || chain === undefined || address === undefined) {
@@ -202,8 +218,11 @@ function parseRegistry(env: NodeJS.ProcessEnv, environment: Environment, simulat
   } catch {
     throw new Error(`SETTLEBACK_REGISTRY_RPC_URL is not a URL, got "${rpcUrl}".`);
   }
-  if (environment === "local") {
-    if (HSK_CHAINS.includes(chainId)) throw new Error("The local environment uses a disposable chain for the registry, never HSK Chain 133 or 177.");
+  if (environment === "local" && demoRegistry === "hsk-testnet") {
+    if (chainId !== HSK_TESTNET) throw new Error(`SETTLEBACK_DEMO_REGISTRY=hsk-testnet uses a registry on HSK Chain testnet (133), not chain ${chainId}.`);
+    if (url.protocol !== "https:") throw new Error("A registry RPC URL on HSK Chain must use HTTPS.");
+  } else if (environment === "local") {
+    if (isHskChain(chainId)) throw new Error("The local environment uses a disposable chain for the registry, never HSK Chain 133 or 177, unless the demo is pointed at its HSK Chain testnet registry.");
   } else {
     const expected = describeNetwork(environment, simulatedProfile).registryChainId;
     if (chainId !== expected) throw new Error(`The ${environment} environment's registry is on chain ${expected}, not ${chainId}.`);
@@ -220,7 +239,7 @@ function parseRegistry(env: NodeJS.ProcessEnv, environment: Environment, simulat
     address: address as `0x${string}`,
     confirmations: parseBoundedInteger(
       "SETTLEBACK_REGISTRY_CONFIRMATIONS",
-      env.SETTLEBACK_REGISTRY_CONFIRMATIONS ?? (environment === "local" ? "1" : "3"),
+      env.SETTLEBACK_REGISTRY_CONFIRMATIONS ?? (isHskChain(chainId) ? "3" : "1"),
       1,
       64,
     ),

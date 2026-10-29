@@ -14,7 +14,7 @@ const DEMO_GATEWAY_TICK_MS = 1_000;
 const config = loadConfig();
 const db = openDatabase({ path: config.databasePath, environment: config.environment });
 // A configured but unreachable or mismatched registry stops startup instead of running without it.
-const registry = await connectRegistry(config.registry, config.environment);
+const registry = await connectRegistry(config.registry);
 const demo = config.demo === undefined ? undefined : await startDemoWorld(db, { parties: config.demo, tickMs: DEMO_GATEWAY_TICK_MS });
 const apiKey = config.assessment.apiKey;
 const provider = apiKey === undefined ? undefined : new ClaudeAssessmentProvider({ ...config.assessment, apiKey: apiKey.reveal() });

@@ -2,11 +2,22 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, describeError } from "./api.ts";
 import { CaseList } from "./CaseList.tsx";
 import { CaseWorkspace } from "./CaseWorkspace.tsx";
-import { short } from "./format.ts";
+import { explorerLink, networkName, short } from "./format.ts";
 import type { Health, Session, SignInChallenge } from "./types.ts";
 import { connectWallet, currentAccount, hasWallet, signMessage, watchWallet, type WalletAccount } from "./wallet.ts";
 
 type Loadable<T> = { status: "loading" } | { status: "ready"; value: T } | { status: "unavailable"; reason: string };
+
+/** The registry is labeled live only on HSK Chain, where it links to the explorer; a disposable chain is labeled by its ID. */
+function RegistryBadge({ chainId, address, live }: { chainId: number; address: string; live: boolean }) {
+  const text = live ? `Registry live on ${networkName(chainId)} · ${short(address, 4)}` : `Registry ${short(address, 4)} · chain ${chainId}`;
+  const link = explorerLink(chainId, "address", address);
+  return (
+    <span className={live ? "badge badge--live" : "badge"} title={address}>
+      {link === null ? text : <a href={link} target="_blank" rel="noreferrer">{text}</a>}
+    </span>
+  );
+}
 
 export function App() {
   const [health, setHealth] = useState<Loadable<Health>>({ status: "loading" });
@@ -84,7 +95,7 @@ export function App() {
             <>
               <span className={ready.mode === "simulated" ? "badge badge--simulated" : "badge badge--live"}>{ready.mode === "simulated" ? "Simulation · no real funds" : "Live"}</span>
               <span className="badge">{ready.networkLabel}</span>
-              <span className="badge">{ready.registry.status === "connected" ? `Registry ${short(ready.registry.address, 4)} · chain ${ready.registry.chainId}` : "No registry"}</span>
+              {ready.registry.status === "connected" ? <RegistryBadge chainId={ready.registry.chainId} address={ready.registry.address} live={ready.registry.provenance === "LIVE"} /> : <span className="badge">No registry</span>}
               <span className={ready.paymentWrites === "enabled" ? "badge" : "badge badge--muted"}>Payment writes {ready.paymentWrites}</span>
             </>
           )}

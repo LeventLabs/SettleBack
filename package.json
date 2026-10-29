@@ -17,6 +17,7 @@
     "build": "npm run typecheck && npm run build --workspaces --if-present && npm run contracts:build",
     "dev:server": "npm run dev -w @settleback/server",
     "demo": "node --env-file-if-exists=.env apps/server/scripts/demo.ts",
+    "demo:testnet": "node --env-file-if-exists=.env apps/server/scripts/demo.ts --hsk-testnet",
     "dev:web": "npm run dev -w @settleback/web",
     "contracts:build": "forge build --root contracts"
   },

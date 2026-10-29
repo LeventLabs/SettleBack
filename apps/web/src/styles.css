@@ -142,6 +142,11 @@ pre {
   font-weight: 600;
 }
 
+.badge a {
+  color: inherit;
+  text-underline-offset: 2px;
+}
+
 .badge--attention {
   color: var(--attention);
   background: var(--attention-surface);

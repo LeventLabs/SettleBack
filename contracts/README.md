@@ -11,9 +11,10 @@ The registry goes to mainnet only after a security review. Neither contract hold
 
 | Contract | Network | Address | Verifier | Transaction |
 |---|---|---|---|---|
-| `RecoveryRegistry` | HSK Chain testnet (133) | [`0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C`](https://repo.sourcify.dev/133/0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C) | `0x7F13f5Ecf7ef6dAA52a49a459D9295F018673919` | `0x3ab879880f2aa20ae846fa81353cb434ff056579700e41848726907b995aa9e6` (block 35000152) |
+| `RecoveryRegistry` | HSK Chain testnet (133) | [`0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C`](https://testnet-explorer.hskchain.net/address/0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C) | `0x7F13f5Ecf7ef6dAA52a49a459D9295F018673919` | `0x3ab879880f2aa20ae846fa81353cb434ff056579700e41848726907b995aa9e6` (block 35000152) |
+| `RecoveryRegistry` (demo) | HSK Chain testnet (133) | [`0xf1F8FD66A678693C1Ff02611c285ba105562de34`](https://testnet-explorer.hskchain.net/address/0xf1F8FD66A678693C1Ff02611c285ba105562de34) | `0xf7c4d06e7bAB0D2C01672EAe2a3dcd68d208e830` | `0xd0cb7e6f7f04814d803b78bd26d84acdc454d1d4b39c31e3e3612915fa517365` (block 35053138) |
 
-Deployed from commit `e9b9afc` on 28 October 2026; source verified on Sourcify (creation and runtime `match`; the build omits the metadata hash, so an exact metadata match is not possible). The on-chain runtime code was also compared byte for byte with a local deployment of the same source and verifier. The marker on 177 is not deployed yet.
+The main registry was deployed from commit `e9b9afc` on 28 October 2026; source verified on Sourcify (creation and runtime `match`; the build omits the metadata hash, so an exact metadata match is not possible) and on the testnet Blockscout. The on-chain runtime code was also compared byte for byte with a local deployment of the same source and verifier. The demo registry was deployed on 29 October 2026 from the same, unchanged source with its own verifier, for `npm run demo:testnet`, whose cases reference simulated payments; its runtime code equals the main registry's apart from the embedded verifier address, and it is verified on Sourcify and Blockscout. The marker on 177 is not deployed yet and points to the main registry.
 
 ## Tests
 
@@ -44,11 +45,14 @@ forge script script/DeployMarker.s.sol:DeployMarker \
   --rpc-url https://mainnet.hsk.xyz --account settleback-deployer --sender <deployer address> --broadcast
 ```
 
-Source verification uses Sourcify on both networks, and Blockscout on mainnet:
+Source verification uses Sourcify on both networks, and Blockscout on both (testnet-explorer.hskchain.net for 133, hsk.blockscout.com for 177):
 
 ```bash
 forge verify-contract <registry address> src/RecoveryRegistry.sol:RecoveryRegistry --chain 133 \
   --verifier sourcify --constructor-args $(cast abi-encode "constructor(address)" <verifier address>) --watch
+forge verify-contract <registry address> src/RecoveryRegistry.sol:RecoveryRegistry --chain 133 \
+  --verifier blockscout --verifier-url https://testnet-explorer.hskchain.net/api/ \
+  --constructor-args $(cast abi-encode "constructor(address)" <verifier address>) --watch
 
 forge verify-contract <marker address> src/SettleBackDeploymentMarker.sol:SettleBackDeploymentMarker --chain 177 \
   --verifier blockscout --verifier-url https://hsk.blockscout.com/api/ \

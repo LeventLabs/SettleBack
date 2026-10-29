@@ -102,6 +102,18 @@ export function actionLabel(action: string): string {
   return ACTION_LABELS[action] ?? action;
 }
 
+const EXPLORERS: Readonly<Record<number, string>> = { 133: "https://testnet-explorer.hskchain.net", 177: "https://hsk.blockscout.com" };
+
+/** A block-explorer page on HSK Chain; none for a disposable chain. Never used for simulated payment hashes. */
+export function explorerLink(chainId: number, kind: "tx" | "address", value: string): string | null {
+  const base = EXPLORERS[chainId];
+  return base === undefined ? null : `${base}/${kind}/${value}`;
+}
+
+export function networkName(chainId: number): string {
+  return chainId === 133 ? "HSK Chain testnet" : chainId === 177 ? "HSK Chain" : `chain ${chainId}`;
+}
+
 export function short(value: string, keep = 6): string {
   if (value.length <= keep * 2 + 2) return value;
   return `${value.slice(0, keep + 2)}…${value.slice(-keep)}`;

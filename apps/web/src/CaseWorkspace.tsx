@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api, describeError } from "./api.ts";
 import { DecisionPanel } from "./DecisionPanel.tsx";
-import { PROVENANCE_LABELS, SOURCE_LABELS, laneOf, paymentLabel, paymentTone, roleLabel, short, stateLabel, toneOf, when, type Tone } from "./format.ts";
+import { PROVENANCE_LABELS, SOURCE_LABELS, laneOf, networkName, paymentLabel, paymentTone, roleLabel, short, stateLabel, toneOf, when, type Tone } from "./format.ts";
 import { RecoveryPanel } from "./RecoveryPanel.tsx";
 import type { CaseView, EvidenceItem, Health, Session } from "./types.ts";
 import { usePoll } from "./usePoll.ts";
@@ -93,7 +93,10 @@ function CaseHeader({ data, health, session }: { data: CaseView; health: Health;
         </div>
         <div>
           <dt>Inputs</dt>
-          <dd>{health.mode === "simulated" ? "Synthetic fixture · simulated gateway and payment chain" : "Live records"}</dd>
+          <dd>
+            {health.mode === "simulated" ? "Synthetic fixture · simulated gateway and payment chain" : "Live records"}
+            {health.mode === "simulated" && health.registry.status === "connected" && health.registry.provenance === "LIVE" ? ` · registry live on ${networkName(health.registry.chainId)}` : ""}
+          </dd>
         </div>
       </dl>
     </header>

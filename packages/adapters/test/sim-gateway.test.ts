@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { Address, TransferTerms } from "@settleback/domain";
 import {
   RailUnavailableError,
+  SimChain,
   WEBHOOK_RETRY_DELAYS_MS,
   buildSimulatedPaymentMandate,
   createSimulatedAdapters,
@@ -199,5 +200,19 @@ describe("simulated gateway: faults", () => {
     const elapsed = Date.parse(finalizedAttempts.at(-1)?.at ?? "") - Date.parse(finalizedAttempts[0]?.at ?? "");
     expect(elapsed).toBeGreaterThanOrEqual(WEBHOOK_RETRY_DELAYS_MS.reduce((sum, delay) => sum + delay, 0));
     expect((await verdict()).status).toBe("VERIFIED");
+  });
+});
+
+describe("simulated chain hashes", () => {
+  it("differ between simulators by default, so a restart cannot reuse a recorded payment reference", () => {
+    const first = createSimulatedAdapters({ environment: "local", webhookSecret: "s" }).paymentChain;
+    const second = createSimulatedAdapters({ environment: "local", webhookSecret: "s" }).paymentChain;
+    expect(first.nextTxHash()).not.toBe(second.nextTxHash());
+    expect(new SimChain(133, "a").nextTxHash()).not.toBe(new SimChain(133, "b").nextTxHash());
+  });
+
+  it("stay fixed when a fixture asks for them, matching earlier recordings", () => {
+    const fixed = createSimulatedAdapters({ environment: "local", webhookSecret: "s", fixedChainHashes: true }).paymentChain;
+    expect(fixed.nextTxHash()).toBe("0xc2f9854ce35057c840d5c53664baafa2eb5f3712254e2733158a2e136b2e3c70");
   });
 });

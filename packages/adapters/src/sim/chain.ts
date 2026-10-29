@@ -9,9 +9,16 @@ export class SimChain {
   private block = 0;
   private counter = 0;
   private readonly transfers = new Map<string, StoredTransfer>();
+  private readonly seed: string | undefined;
 
-  constructor(chainId: number) {
+  /**
+   * Without a seed the hashes are fixed per chain, which fixtures with recorded evidence rely on.
+   * Anything that keeps payment references across restarts, a database or a registry, must pass a
+   * fresh random seed so a restarted simulator never reuses one.
+   */
+  constructor(chainId: number, seed?: string) {
     this.chainId = chainId;
+    this.seed = seed;
   }
 
   get blockNumber(): number {
@@ -22,10 +29,11 @@ export class SimChain {
     this.block += blocks;
   }
 
-  /** Deterministic 32-byte transaction hash, unique per chain. */
+  /** A 32-byte transaction hash, unique per chain and seed. */
   nextTxHash(): string {
     this.counter += 1;
-    return `0x${createHash("sha256").update(`sim-chain:${this.chainId}:${this.counter}`).digest("hex")}`;
+    const label = this.seed === undefined ? `sim-chain:${this.chainId}:${this.counter}` : `sim-chain:${this.chainId}:${this.seed}:${this.counter}`;
+    return `0x${createHash("sha256").update(label).digest("hex")}`;
   }
 
   includeTransfer(transfer: Omit<StoredTransfer, "blockNumber" | "chainId">): void {

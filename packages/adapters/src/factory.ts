@@ -1,4 +1,4 @@
-import { generateKeyPairSync, type KeyObject } from "node:crypto";
+import { generateKeyPairSync, randomBytes, type KeyObject } from "node:crypto";
 import { describeNetwork, type Environment, type NetworkDescription, type NetworkProfile } from "@settleback/domain";
 import { ManualClock } from "./clock.ts";
 import { MerchantClient } from "./hsp/merchant-client.ts";
@@ -27,6 +27,12 @@ export interface SimulatedAdapterOptions {
   webhookSecret: string;
   merchantName?: string;
   start?: string;
+  /**
+   * Fixed transaction hashes, for fixtures whose recorded evidence quotes them. By default each
+   * simulator draws a random seed, so its hashes never collide with references a database or
+   * registry kept from an earlier run.
+   */
+  fixedChainHashes?: boolean;
 }
 
 /**
@@ -40,7 +46,7 @@ export function createSimulatedAdapters(options: SimulatedAdapterOptions): Simul
   }
   const network = describeNetwork("local", options.profile);
   const clock = new ManualClock(options.start ?? "2026-10-30T10:00:00.000Z");
-  const paymentChain = new SimChain(network.paymentChainId);
+  const paymentChain = new SimChain(network.paymentChainId, options.fixedChainHashes === true ? undefined : randomBytes(16).toString("hex"));
   const gateway = new SimGateway({ clock, chain: paymentChain });
   const keys = generateKeyPairSync("ec", { namedCurve: "secp256k1" });
   const merchantName = options.merchantName ?? "SettleBack Demo Seller";

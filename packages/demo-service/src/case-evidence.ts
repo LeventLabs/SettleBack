@@ -138,6 +138,8 @@ async function runGatewayPayment(
   const sim = createSimulatedAdapters({
     environment: "local",
     webhookSecret: "sim-webhook-secret",
+    // Recorded assessments quote these transaction hashes; they must not change between runs.
+    fixedChainHashes: true,
   });
   const id = createHash("sha256").update(terms.operationId).digest("hex").slice(0, 16);
   const order = {

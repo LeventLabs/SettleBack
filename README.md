@@ -2,46 +2,63 @@
 
 **Recovery for paid agent jobs.**
 
-An agent pays for a service. The request times out. Did the job fail, did the response disappear, or is the payment still being confirmed?
+An agent pays another agent's service for a job. The request times out. Did the job fail, did only the response get lost, or is the payment still confirming? Today the buyer pays again or writes it off, and the seller answers by reading logs.
 
-SettleBack is being built to reconcile payment, execution, and delivery evidence, then coordinate a safe next step.
+SettleBack reconciles the payment, execution, and delivery records of a paid job and takes one bounded step:
 
-## The recovery workflow
-
-| What happened | Intended response |
+| What the records show | What SettleBack does |
 |---|---|
-| The result exists, but the response was lost | Retrieve the existing result without starting another paid job. |
-| Payment is verified and the service terms support repayment | Obtain the seller's approval, make a separate repayment, and verify settlement. |
-| Evidence or payment status is uncertain | Keep the case open and stop automatic new spending within the application. |
+| The result exists; only the response was lost | Delivers the existing result to the buyer who paid, checked against its digest, without running or charging the job again. |
+| The job failed before producing a result, and the service terms allow repayment | The seller approves in its own wallet and pays a separate repayment to the buyer, signed as an AP2 Payment Mandate carrying an EIP-3009 authorization. |
+| The records disagree, or the payment is uncertain | Keeps the case open, freezes further spending, and leaves it to a person. |
 
-The first workflow covers one buyer agent, one seller, and an asynchronous data-extraction job. The same problem can occur in research, document processing, and other paid AI services.
+Deterministic rules settle the clear cases. When they abstain, Claude reads the logs and the terms and returns cited findings; code checks every quote and any artifact the model points to. Model output never authorizes a transfer. Each recovery is registered, reserved, and recorded on the `RecoveryRegistry` contract on HSK Chain, so both parties can verify the outcome and a payment reference can be used only once.
 
-## Evidence before action
+## Try it
 
-SettleBack separates three questions: **Was it paid? Was it executed? Was it delivered?**
+```bash
+npm install
+npm run demo          # disposable anvil chain, the registry, and four seeded cases
+npm run demo:testnet  # the same cases, with the registry steps on HSK Chain testnet
+npm run dev:web       # in a second terminal, then open http://localhost:5173
+```
 
-Deterministic checks handle payment identities, amounts, permissions, and duplicate actions. Claude is intended to interpret conflicting records and service terms, cite supporting evidence, and identify what remains unknown. Model output does not authorize a transfer.
+Requirements, keys, and wallet setup are under [Development](#development).
 
-The operator sees a case timeline, the relevant evidence, a recommended action, and its approval status.
+## What is real and what is simulated
 
-## Built around HSP and HSK Chain
+| Part | Status |
+|---|---|
+| `RecoveryRegistry` contract | Deployed on HSK Chain testnet (133), verified on Sourcify and Blockscout, with Foundry unit, fuzz, and invariant tests. The main deployment [`0xcC1A…996C`](https://testnet-explorer.hskchain.net/address/0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C) has recorded no recovery yet. The demo deployment [`0xf1F8…de34`](https://testnet-explorer.hskchain.net/address/0xf1F8FD66A678693C1Ff02611c285ba105562de34) holds the real registration, reservation, and outcome transactions of `npm run demo:testnet`, whose cases reference simulated payments. |
+| Deployment marker on HSK Chain mainnet (177) | Not deployed yet. The registry goes to mainnet only after a security review. |
+| Wallet sign-in, roles, case workspace | Real: EIP-4361 sign-in with a browser wallet, and role checks on every case, recovery, and delivery route. |
+| Repayment authorization | A real EIP-712 signature in the seller's wallet: an EIP-3009 `TransferWithAuthorization` under the HSK Chain testnet USDC domain, which a test pins to the value read from the token contract. |
+| HSP Merchant gateway | Simulated. The simulator follows the public documentation (Cart Mandate, merchant JWT, signed requests, payment statuses, webhooks). The Payment Mandate submission endpoint is not published and merchant access is pending, so no payment has gone through HSP. |
+| Payments and their chain | Simulated by the gateway simulator and its own chain; the transfer hashes shown are the simulator's. |
+| Job service, logs, artifacts | Synthetic but executed: a real extraction job runs with injected faults, and the evidence comes from running it. Only buyer claims are hand-written, and they are labeled. |
+| Claude assessment | Live when `ANTHROPIC_API_KEY` is set (`claude-opus-5-5`); recorded runs are in [evaluation](evaluation/README.md). |
+| Automatic repayment under a seller's standing policy | Supported and tested in the contract; the guarded signer that would use it is not built. |
 
-The planned integration uses HashKey Settlement Protocol (HSP) to verify the original payment and any seller-authorized repayment. An HSK Chain recovery registry will record action reservations and outcomes that the application consumes.
+No completed live payment, mainnet deployment, or production readiness is claimed.
 
-A repayment is a new seller-funded transfer, not a reversal. Payment evidence does not prove service quality, and the registry does not control transfers made outside SettleBack.
+## Architecture and trust boundaries
 
-## Current status
+```
+buyer wallet ──┐                         ┌── HSP gateway (simulated) ── payment chain (simulated)
+seller wallet ─┼── case workspace ── SettleBack server ── RecoveryRegistry on HSK Chain
+operator ──────┘    (React, browser)     │  (Fastify, SQLite)
+                                         └── Claude (assessment only, no tools)
+```
 
-**Early development.** The domain rules, payment and registry simulators, the agent-to-agent payment flow against the simulated gateway, the recovery registry contract with its Foundry tests, the instrumented demo service, evidence-backed cases with a rules-only assessment, a cited Claude assessment for the cases the rules cannot settle, recovery of an existing result through the registry (proposal, reservation, delivery to the buyer, acknowledgement, and the recorded outcome), wallet sign-in with role-checked HTTP routes for cases, recovery, and delivery, one-use payment execution permits with gateway and chain reconciliation, per-case repayment by the seller, signed in the seller's wallet as an AP2 Payment Mandate carrying an EIP-3009 authorization and closed through the registry, and a case workspace for the buyer, the seller, and operators are in place and tested locally. `npm run demo` runs these scenarios locally against a disposable chain; outside the demo, the server has no job service, service terms, or payment rail connected yet, so those routes report the dependency as unavailable. Standing-policy repayment through the seller's guarded signer, live HSP integration, and deployment references will follow as they are implemented.
+- The server decides case state. The browser displays it and asks wallets to sign; nothing a request says can grant a role.
+- Buyer and seller keys stay in their wallets. The server holds only the verifier key, which registers cases, reserves retrievals, and records outcomes; it cannot reserve a repayment, act for a seller, or move funds.
+- A payment counts as settled only when the gateway record and the on-chain transfer agree. Contradictions freeze the payment for a person.
+- The model has no tools and authorizes nothing. Its quotes are matched byte for byte in the stored evidence, and an artifact it names must be confirmed by the job service and the artifact store.
+- The registry holds no tokens and has no owner or upgrade path. The verifier is trusted to record truthfully; reservations by the seller are confirmed from the chain.
 
-The MVP targets:
+## Prior work
 
-- A recoverable-result scenario.
-- An explicitly approved repayment scenario.
-- An unresolved case that safely stops further spending.
-- Cited evidence analysis and an inspectable recovery record.
-
-The `RecoveryRegistry` is deployed on HSK Chain testnet (133) at [`0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C`](https://testnet-explorer.hskchain.net/address/0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C), source-verified on Sourcify and Blockscout. The application's registry steps (registering cases, reserving and completing retrievals, confirming repayment reservations) are tested against local deployments of the same contract; no recovery has run through this deployment yet. A second deployment of the same contract, the demo registry [`0xf1F8FD66A678693C1Ff02611c285ba105562de34`](https://testnet-explorer.hskchain.net/address/0xf1F8FD66A678693C1Ff02611c285ba105562de34), records the recoveries of `npm run demo:testnet`; its cases reference simulated payments, which is why they are kept off the main registry. Live HSP access and integration remain unverified for SettleBack. No completed live payment flow, mainnet deployment, or production readiness is claimed.
+The code in this repository was written during the hackathon, from 26 October 2026 (see the git history). LeventLabs has built two earlier projects on HSK Chain, and that experience with payment evidence and on-chain policy shaped this design. No code was taken from them, except that `SettleBackDeploymentMarker` follows the pattern of a deployment marker from one of them (an immutable record of the commit, deployer, and time), rewritten here to point at the registry deployment. Third-party code is limited to the npm dependencies in `package-lock.json` and Foundry's `forge-std` for contract tests.
 
 ## Development
 
@@ -81,7 +98,7 @@ npm run demo:testnet # the same seeded server, with the demo registry on HSK Cha
 
 The workspace signs in with the browser wallet and lists only the cases the account is party to (every case for an operator). Each case keeps the payment, execution, and delivery records in separate lanes. It shows what the deterministic rules found, with their quotes, and a cited assessment when the rules abstain. It also shows the one recovery the case may have: its fixed terms, where it stands, and the next step for the signed-in party. The seller approves a per-case repayment by sending the registry reservation from its own wallet and then pays it by signing the repayment's EIP-3009 authorization in the same wallet. The buyer downloads the recovered result, sees the digest the browser computed beside the expected one, and can acknowledge only a match. A state shows as done only once the chain and the registry confirm it. Changing the wallet's account signs the user out. The buyer sees evidence digests and the rules' quotes from the bound terms, but not the seller's records.
 
-The server runs its TypeScript sources directly with Node's built-in type stripping, so there is no server build step. SQLite and request signing will use Node's built-in `node:sqlite` and `node:crypto`.
+The server runs its TypeScript sources directly with Node's built-in type stripping, so there is no server build step. SQLite and request signing use Node's built-in `node:sqlite` and `node:crypto`.
 
 | Path | Contents |
 |---|---|
@@ -95,6 +112,8 @@ The server runs its TypeScript sources directly with Node's built-in type stripp
 | `evaluation` | Recorded live runs of the Claude assessment over the fixture cases, with a generated report |
 | `contracts` | The recovery registry and the deployment marker, with Foundry unit, fuzz, and invariant tests |
 | `config` | Non-secret configuration examples |
+
+## How it works
 
 The demo service performs the purchased work for real: it extracts structured items from the source document and stores the result by its SHA-256 digest. The edge writes nginx-style access lines, the worker writes its own application log under its own job alias and clock, and the job service keeps a structured status whose every change goes through the job state machine. A job starts at most once per operation and is never restarted after an uncertain run. Faults are injected as component behavior (a dropped response, a terminal failure, an edge timeout while the worker finishes late, a lost status update, a corrupted artifact), so disagreeing records come from components that actually disagree.
 

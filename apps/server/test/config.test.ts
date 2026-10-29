@@ -13,6 +13,7 @@ describe("loadConfig", () => {
       simulatedProfile: "testnet",
       assessment: { model: "claude-opus-5-5", effort: "medium", maxTokens: 8000, timeoutMs: 45000, apiKey: undefined },
       auth: { webOrigin: "http://localhost:5173", operators: [] },
+      demo: undefined,
     });
   });
 
@@ -111,6 +112,19 @@ describe("loadConfig", () => {
     const operator = "0x8626f6940E2eb28930eFb4CeF49B2d1F2C9C1199";
     expect(loadConfig({ SETTLEBACK_OPERATORS: ` ${operator}, ${operator.toLowerCase()} ,` }).auth.operators).toEqual([operator.toLowerCase()]);
     expect(() => loadConfig({ SETTLEBACK_OPERATORS: "operator-1" })).toThrow(/SETTLEBACK_OPERATORS/);
+  });
+
+  it("runs the fixture demo only locally, in memory, for two distinct accounts", () => {
+    const parties = { SETTLEBACK_DEMO_BUYER: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", SETTLEBACK_DEMO_SELLER: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" };
+    const demo = loadConfig({ SETTLEBACK_DEMO: "fixtures", ...parties });
+    expect(demo.demo).toEqual({ buyer: parties.SETTLEBACK_DEMO_BUYER.toLowerCase(), seller: parties.SETTLEBACK_DEMO_SELLER.toLowerCase() });
+    expect(demo.databasePath).toBe(":memory:");
+    expect(() => loadConfig({ SETTLEBACK_DEMO: "fixtures" })).toThrow(/SETTLEBACK_DEMO_BUYER/);
+    expect(() => loadConfig({ SETTLEBACK_DEMO: "fixtures", ...parties, SETTLEBACK_DEMO_SELLER: parties.SETTLEBACK_DEMO_BUYER.toLowerCase() })).toThrow(/different accounts/);
+    expect(() => loadConfig({ SETTLEBACK_DEMO: "fixtures", ...parties, SETTLEBACK_DB_PATH: "/tmp/demo.db" })).toThrow(/in memory/);
+    expect(() => loadConfig({ SETTLEBACK_DEMO: "everything", ...parties })).toThrow(/SETTLEBACK_DEMO must be/);
+    expect(() => loadConfig({ SETTLEBACK_ENV: "testnet", SETTLEBACK_WEB_ORIGIN: "https://settleback.xyz", SETTLEBACK_DEMO: "fixtures", ...parties })).toThrow(/only to the local environment/);
+    expect(() => loadConfig(parties)).toThrow(/apply only with SETTLEBACK_DEMO/);
   });
 
   it("keeps the verifier key out of JSON and error messages", () => {

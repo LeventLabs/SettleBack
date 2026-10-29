@@ -30,7 +30,7 @@ export interface CaseRouteDependencies {
   /** Without one, an assessment request is recorded as failed, never skipped. */
   provider: AssessmentProvider | undefined;
   assessmentTimeoutMs: number;
-  /** The rail and signer repayments are paid with. Without them no repayment is paid. */
+  /** The rail and signer repayments are paid with; absent when payment writes are disabled. */
   payments: RepaymentPayments | undefined;
 }
 
@@ -146,7 +146,7 @@ export function registerCaseRoutes(app: FastifyInstance, deps: CaseRouteDependen
     const { id } = request.params as { id: string };
     const { relations } = readTransaction(db, () => scopeCase(db, session, id));
     requireRelation(relations, ["seller"], "Only the operation's seller pays its repayment.");
-    if (deps.payments === undefined) throw new RecoveryRefusedError("DEPENDENCY_UNAVAILABLE", "No payment rail is connected; repayments cannot be paid.");
+    if (deps.payments === undefined) throw new RecoveryRefusedError("DEPENDENCY_UNAVAILABLE", "Payment writes are disabled or no payment rail is connected; repayments cannot be paid.");
     const outcome = await requestRepayment(db, { caseId: id, requestedBy: session.address, registry: deps.registry, payments: deps.payments, now });
     return {
       status: outcome.status,

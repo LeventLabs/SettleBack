@@ -16,11 +16,11 @@ export interface AppDependencies {
   db: DatabaseSync;
   registry?: RegistryGateway | undefined;
   /** Service terms by policy ID; a case under a policy without terms cannot be assessed or prepared. */
-  terms?: ReadonlyMap<string, PolicyTerms>;
+  terms?: ReadonlyMap<string, PolicyTerms> | undefined;
   /** The job service and artifact store; without them nothing is assessed against them or delivered. */
   lookup?: ResultLookup | undefined;
   provider?: AssessmentProvider | undefined;
-  /** The rail and signer repayments are paid with; without them no repayment is paid. */
+  /** The rail and signer repayments are paid with; used only when payment writes are enabled. */
   payments?: RepaymentPayments | undefined;
   clock?: () => Date;
   /** Authenticates sign-in challenges; a fresh random key per process unless given. */
@@ -93,7 +93,8 @@ export function buildApp(config: ServerConfig, dependencies: AppDependencies): F
     lookup: dependencies.lookup,
     provider: dependencies.provider,
     assessmentTimeoutMs: config.assessment.timeoutMs,
-    payments: dependencies.payments,
+    // Payment writes stay off unless the configuration enables them, whatever rail is connected.
+    payments: config.paymentWritesEnabled ? dependencies.payments : undefined,
   });
 
   return app;

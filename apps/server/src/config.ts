@@ -56,6 +56,14 @@ export interface ServerConfig {
   /** Undefined when no registry is configured; integrated repayment is then unavailable. */
   registry: RegistryConfig | undefined;
   auth: AuthConfig;
+  /** Local only: seeded fixture cases, in memory and reseeded on every start. */
+  demo: DemoConfig | undefined;
+}
+
+export interface DemoConfig {
+  /** The fixture operations' buyer and seller: accounts the person running the demo can sign in with. */
+  buyer: `0x${string}`;
+  seller: `0x${string}`;
 }
 
 export interface AuthConfig {
@@ -92,6 +100,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new Error(`SETTLEBACK_SIM_PROFILE applies only to the local environment, not "${environment}".`);
   }
 
+  const demo = parseDemo(env, environment);
   return {
     environment,
     simulatedProfile: parseNetworkProfile(env.SETTLEBACK_SIM_PROFILE ?? "testnet"),
@@ -99,7 +108,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: parsePort(env.SETTLEBACK_PORT ?? "8787"),
     logLevel: parseLogLevel(env.SETTLEBACK_LOG_LEVEL ?? "info"),
     paymentWritesEnabled,
-    databasePath: env.SETTLEBACK_DB_PATH ?? `${DEFAULT_DATA_DIR}settleback-${environment}.db`,
+    // The demo's data is disposable: it lives in memory and is reseeded on every start.
+    databasePath: demo === undefined ? (env.SETTLEBACK_DB_PATH ?? `${DEFAULT_DATA_DIR}settleback-${environment}.db`) : ":memory:",
     assessment: {
       model: parseMember("SETTLEBACK_ASSESSMENT_MODEL", env.SETTLEBACK_ASSESSMENT_MODEL ?? "claude-opus-5-5", ASSESSMENT_MODELS),
       effort: parseMember("SETTLEBACK_ASSESSMENT_EFFORT", env.SETTLEBACK_ASSESSMENT_EFFORT ?? "medium", ASSESSMENT_EFFORTS),
@@ -109,7 +119,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     },
     registry: parseRegistry(env, environment, env.SETTLEBACK_SIM_PROFILE === undefined ? "testnet" : parseNetworkProfile(env.SETTLEBACK_SIM_PROFILE)),
     auth: { webOrigin: parseWebOrigin(env.SETTLEBACK_WEB_ORIGIN, environment), operators: parseOperators(env.SETTLEBACK_OPERATORS ?? "") },
+    demo,
   };
+}
+
+function parseDemo(env: NodeJS.ProcessEnv, environment: Environment): DemoConfig | undefined {
+  const mode = env.SETTLEBACK_DEMO ?? "";
+  const buyer = env.SETTLEBACK_DEMO_BUYER ?? "";
+  const seller = env.SETTLEBACK_DEMO_SELLER ?? "";
+  if (mode === "") {
+    if (buyer !== "" || seller !== "") throw new Error("SETTLEBACK_DEMO_BUYER and SETTLEBACK_DEMO_SELLER apply only with SETTLEBACK_DEMO=fixtures.");
+    return undefined;
+  }
+  if (mode !== "fixtures") throw new Error(`SETTLEBACK_DEMO must be "fixtures" or unset, got "${mode}".`);
+  if (environment !== "local") throw new Error(`SETTLEBACK_DEMO applies only to the local environment, not "${environment}".`);
+  if ((env.SETTLEBACK_DB_PATH ?? "") !== "") throw new Error("The demo keeps its data in memory; unset SETTLEBACK_DB_PATH.");
+  for (const [name, value] of [["SETTLEBACK_DEMO_BUYER", buyer], ["SETTLEBACK_DEMO_SELLER", seller]] as const) {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(value)) throw new Error(`${name} must be the 20-byte hex address of an account you can sign in with, got "${value}".`);
+  }
+  if (buyer.toLowerCase() === seller.toLowerCase()) throw new Error("SETTLEBACK_DEMO_BUYER and SETTLEBACK_DEMO_SELLER must be different accounts.");
+  return { buyer: buyer.toLowerCase() as `0x${string}`, seller: seller.toLowerCase() as `0x${string}` };
 }
 
 const LOCAL_WEB_ORIGIN = "http://localhost:5173";

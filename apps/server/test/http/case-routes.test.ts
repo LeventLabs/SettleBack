@@ -41,8 +41,8 @@ afterEach(async () => {
   db.close();
 });
 
-function server(setup: FixtureCaseSetup | undefined, overrides: Partial<AppDependencies> = {}): FastifyInstance {
-  const app = buildApp(loadConfig({ SETTLEBACK_LOG_LEVEL: "silent", SETTLEBACK_OPERATORS: operator.address }), {
+function server(setup: FixtureCaseSetup | undefined, overrides: Partial<AppDependencies> = {}, env: Record<string, string> = {}): FastifyInstance {
+  const app = buildApp(loadConfig({ SETTLEBACK_LOG_LEVEL: "silent", SETTLEBACK_OPERATORS: operator.address, ...env }), {
     db,
     registry: chain.registry,
     terms: TERMS,
@@ -183,7 +183,7 @@ describe("per-case repayment over HTTP", () => {
       maxFeeBaseUnits: "100000",
     };
     const setup = await setupFixtureCase(db, "refundable-failure-per-case", parties);
-    const app = server(setup, { payments });
+    const app = server(setup, { payments }, { SETTLEBACK_PAYMENT_WRITES: "enabled" });
     const [asBuyer, asSeller, asStranger] = await Promise.all([signIn(app, buyer), signIn(app, seller), signIn(app, stranger)]);
     const url = `/api/cases/${setup.caseId}/recovery/repay`;
     const prepared = (await call(app, asSeller, "POST", `/api/cases/${setup.caseId}/recovery/prepare`)).json();
@@ -198,6 +198,11 @@ describe("per-case repayment over HTTP", () => {
     const unwired = server(setup);
     const noRail = await call(unwired, await signIn(unwired, seller), "POST", url);
     expect([noRail.statusCode, errorCode(noRail)]).toEqual([503, "DEPENDENCY_UNAVAILABLE"]);
+    // A connected rail is not enough: payment writes must be enabled in the configuration.
+    const disabled = server(setup, { payments });
+    const writesOff = await call(disabled, await signIn(disabled, seller), "POST", url);
+    expect([writesOff.statusCode, errorCode(writesOff)]).toEqual([503, "DEPENDENCY_UNAVAILABLE"]);
+    expect(writesOff.json().error.message).toMatch(/Payment writes are disabled/);
 
     const paid = await call(app, asSeller, "POST", url);
     expect(paid.statusCode, paid.body).toBe(200);

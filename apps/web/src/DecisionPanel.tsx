@@ -55,7 +55,7 @@ export function DecisionPanel({ data, wallet, runner }: { data: CaseView; wallet
       {data.assessments === undefined && <p className="empty">Assessments quote the seller's records, so they are visible to the seller and operators.</p>}
       {data.assessments !== undefined && latest === undefined && <p className="empty">No assessment requested. One is needed only when the rules abstain.</p>}
       {latest !== undefined && <Assessment assessment={latest} sourceOf={sourceOf} />}
-      {canAssess && rules?.outcome === "ABSTAINS" && (
+      {canAssess && rules?.outcome === "ABSTAINS" && (latest === undefined || latest.status === "FAILED") && (
         <div className="action">
           <p className="action__why">Claude reads the records and terms and must quote them exactly. It can at most make delivery of an existing result eligible, after code verifies the artifact; it never authorizes a payment.</p>
           <button type="button" className="button" disabled={runner.working !== null || wallet === null} onClick={() => void assess()}>

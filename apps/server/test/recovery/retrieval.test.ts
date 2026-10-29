@@ -7,6 +7,7 @@ import { immediateTransaction } from "../../src/db/database.ts";
 import { ingestEvidence } from "../../src/db/evidence.ts";
 import { assessCase } from "../../src/recovery/assessment.ts";
 import { confirmRepaymentReservation, ensureRegistered, moveCase, prepareRecovery, strandRecovery } from "../../src/recovery/actions.ts";
+import { reconcilePending } from "../../src/payments/reconciler.ts";
 import { acknowledgeDelivery, recordRetrievalOutcome, retrieveResult, type ResultLookup } from "../../src/recovery/retrieval.ts";
 import { BUYER, SELLER, memoryDatabase } from "../db/helpers.ts";
 import { startLocalChain, type LocalChain } from "../registry/anvil.ts";
@@ -327,6 +328,19 @@ describe("registry outcome", () => {
     expect(db.prepare("SELECT count(*) AS n FROM delivery_acks WHERE operation_id = ?").get(setup.operationId)?.n).toBe(1);
     expect(actionEvents(actionId).filter((type) => type === "RECOVERY_DELIVERY_ACKNOWLEDGED")).toHaveLength(1);
     expect(await recordRetrievalOutcome(db, { actionId, registry: chain.registry, now: clock })).toMatchObject({ status: "RECORDED", action: { revision: retried.outcome.action.revision } });
+  });
+
+  it("records a pending outcome on the next reconciliation pass, without the buyer acting again", async () => {
+    const { setup, actionId, digest } = await reservedRetrieval();
+    await retrieve(setup);
+    expect((await acknowledge(setup, digest, { registry: unavailable() })).outcome).toMatchObject({ status: "PENDING" });
+    const failed = await reconcilePending({ db, rail: undefined, registry: unavailable(), now: clock, requiredLevel: "FINAL" });
+    expect(failed.outcomes).toEqual([{ actionId, error: "Error: rpc unavailable" }]);
+    const run = await reconcilePending({ db, rail: undefined, registry: chain.registry, now: clock, requiredLevel: "FINAL" });
+    expect(run.outcomes).toEqual([{ actionId, result: expect.objectContaining({ status: "RECORDED" }) }]);
+    expect(getRecoveryAction(db, actionId)?.state).toBe("COMPLETED");
+    expect(getCase(db, setup.caseId)?.status).toBe("RECOVERED");
+    expect((await reconcilePending({ db, rail: undefined, registry: chain.registry, now: clock, requiredLevel: "FINAL" })).outcomes).toEqual([]);
   });
 
   it("refuses to complete when the registry already recorded a different outcome, before moving anything", async () => {

@@ -23,7 +23,7 @@ npm run demo:testnet  # the same cases, with the registry steps on HSK Chain tes
 npm run dev:web       # in a second terminal, then open http://localhost:5173
 ```
 
-Requirements, keys, and wallet setup are under [Development](#development).
+`npm run demo` needs no configuration and no keys. Without `ANTHROPIC_API_KEY` in `.env`, requests for a cited assessment are recorded as failed; the recorded live runs are in [evaluation](evaluation/README.md). Requirements, wallet setup, and running the testnet demo with your own registry are under [Development](#development).
 
 ## What is real and what is simulated
 
@@ -69,7 +69,7 @@ git clone --recurse-submodules https://github.com/LeventLabs/SettleBack.git
 # or, in an existing clone: git submodule update --init
 
 npm install
-cp config/settleback.example.env .env   # optional; defaults are local and safe
+cp .env.example .env   # optional; every value has a safe local default
 # add ANTHROPIC_API_KEY to .env to enable assessments; .env is ignored by git
 
 npm run typecheck    # TypeScript across all workspaces
@@ -95,6 +95,26 @@ npm run demo:testnet # the same seeded server, with the demo registry on HSK Cha
 ```
 
 `npm run demo:testnet` runs the same seeded cases, with the registry steps sent to the demo registry on HSK Chain testnet instead of a disposable chain: registering each case, the verifier's and the seller's reservations, and the recorded outcomes are real testnet transactions, linked to the [explorer](https://testnet-explorer.hskchain.net/address/0xf1F8FD66A678693C1Ff02611c285ba105562de34) from the workspace. Payments, the gateway, and the job service stay simulated, so every case the demo registers references a simulated payment, and the transfer hashes the workspace shows are the simulator's, never linked to the explorer. That is why the demo has its own registry, deployed from the same source with its own verifier, and never writes to the main one. It reads four keys (`verifier`, `buyer`, `seller`, `operator`), one 0x-prefixed private key per file, from `~/.config/settleback/testnet-demo/` (or `SETTLEBACK_DEMO_KEYS`); each file must be readable only by its owner. The verifier pays for registry writes and the seller for its reservations, so both need testnet HSK from the [faucet](https://hskchain.net/faucet); import the buyer, seller, and operator keys into a wallet used only for this demo, on HSK Chain testnet (chain 133, RPC `https://testnet.hsk.xyz`). The server allows an HSK Chain registry in the local environment only for this demo, only on chain 133, and only over HTTPS, and labels the registry live and the payments simulated. Each registry step waits for three confirmations.
+
+#### Wallet setup
+
+Use a browser wallet such as MetaMask, in a profile kept for testing. For `npm run demo`, add the anvil network (RPC `http://127.0.0.1:8545`, chain ID 31337) and import the buyer, seller, and operator keys the demo prints. Also add HSK Chain testnet (RPC `https://testnet.hsk.xyz`, chain ID 133, currency HSK, explorer `https://testnet-explorer.hskchain.net`): the repayment authorization is signed for chain 133, and wallets sign typed data only for a network they know. Signing it sends nothing. For `npm run demo:testnet`, only HSK Chain testnet is needed.
+
+#### Running the testnet demo with your own registry
+
+SettleBack's demo registry accepts writes only from its own verifier, so `npm run demo:testnet` with your keys needs a registry of your own:
+
+```bash
+npm run demo:keys                               # creates the four demo keys and prints their addresses
+# fund the printed verifier and seller with testnet HSK: https://hskchain.net/faucet
+cp contracts/.env.example contracts/.env        # set a funded deployer, or sign with a Foundry keystore
+cd contracts && SETTLEBACK_VERIFIER=<verifier address> forge script script/DeployRegistry.s.sol:DeployRegistry \
+  --rpc-url https://testnet.hsk.xyz --broadcast  # prints the registry address
+cd .. && echo "SETTLEBACK_DEMO_REGISTRY_ADDRESS=<registry address>" >> .env
+npm run demo:testnet
+```
+
+The deployer pays about 0.006 testnet HSK and has no authority over the registry. If the registry's verifier is not your verifier key, the demo stops and says so before the server starts.
 
 The workspace signs in with the browser wallet and lists only the cases the account is party to (every case for an operator). Each case keeps the payment, execution, and delivery records in separate lanes. It shows what the deterministic rules found, with their quotes, and a cited assessment when the rules abstain. It also shows the one recovery the case may have: its fixed terms, where it stands, and the next step for the signed-in party. The seller approves a per-case repayment by sending the registry reservation from its own wallet and then pays it by signing the repayment's EIP-3009 authorization in the same wallet. The buyer downloads the recovered result, sees the digest the browser computed beside the expected one, and can acknowledge only a match. A state shows as done only once the chain and the registry confirm it. Changing the wallet's account signs the user out. The buyer sees evidence digests and the rules' quotes from the bound terms, but not the seller's records.
 

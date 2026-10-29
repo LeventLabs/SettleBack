@@ -7,7 +7,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { createPublicClient, formatEther, http, type Hex } from "viem";
+import { createPublicClient, formatEther, http, parseAbi, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { deployRegistry } from "@settleback/adapters";
 
@@ -24,7 +24,8 @@ const HSK_TESTNET = {
   rpcUrl: process.env.SETTLEBACK_DEMO_RPC_URL ?? "https://testnet.hsk.xyz",
   registry: (process.env.SETTLEBACK_DEMO_REGISTRY_ADDRESS ?? "0xf1F8FD66A678693C1Ff02611c285ba105562de34") as `0x${string}`,
   explorer: "https://testnet-explorer.hskchain.net",
-  keys: process.env.SETTLEBACK_DEMO_KEYS ?? `${homedir()}/.config/settleback/testnet-demo`,
+  // .env files do not expand ~, so a leading ~/ is expanded here.
+  keys: (process.env.SETTLEBACK_DEMO_KEYS ?? `${homedir()}/.config/settleback/testnet-demo`).replace(/^~(?=\/)/, homedir()),
 };
 const ROLES = ["verifier", "buyer", "seller", "operator"] as const;
 // Only these settings reach the demo server; a live environment's registry, keys, or database in .env never do.
@@ -150,6 +151,14 @@ async function hskTestnet(): Promise<DemoNetwork> {
   const client = createPublicClient({ transport: http(HSK_TESTNET.rpcUrl, { timeout: 15_000 }) });
   const chainId = await client.getChainId();
   if (chainId !== HSK_TESTNET.chainId) fail(`${HSK_TESTNET.rpcUrl} serves chain ${chainId}, not HSK Chain testnet (${HSK_TESTNET.chainId}).`);
+  // The server would refuse a key that is not the registry's verifier; say why, and what to do, before it starts.
+  const registryVerifier = await client.readContract({ address: HSK_TESTNET.registry, abi: parseAbi(["function verifier() view returns (address)"]), functionName: "verifier" });
+  if (registryVerifier.toLowerCase() !== address(keys.verifier).toLowerCase()) {
+    fail(
+      `The registry ${HSK_TESTNET.registry} has verifier ${registryVerifier}, not your verifier key ${address(keys.verifier)}. ` +
+        "Deploy your own demo registry with your verifier (see README) and set SETTLEBACK_DEMO_REGISTRY_ADDRESS.",
+    );
+  }
   const balances: string[] = [];
   for (const role of ROLES) {
     const holder = address(keys[role]);
@@ -162,7 +171,7 @@ async function hskTestnet(): Promise<DemoNetwork> {
 }
 
 function readKey(file: string): Hex {
-  if (!existsSync(file)) fail(`Missing ${file}. Create the demo keys there (one 0x-prefixed private key per file) or set SETTLEBACK_DEMO_KEYS.`);
+  if (!existsSync(file)) fail(`Missing ${file}. Run npm run demo:keys to create the demo keys, or set SETTLEBACK_DEMO_KEYS.`);
   if ((statSync(file).mode & 0o077) !== 0) fail(`${file} is readable by other users; restrict it with chmod 600.`);
   const key = readFileSync(file, "utf8").trim();
   // Never echo the value.

@@ -16,6 +16,10 @@ cbor_metadata = true
 [fuzz]
 runs = 1024
 
+# Style lints run on demand (forge lint), not on every build, so `npm run demo` output stays readable.
+[lint]
+lint_on_build = false
+
 # Measured on 28 October 2026 with these settings, share of runs reaching each outcome: per-case
 # reservation 127/129, standing-policy reservation 101/129, repayment 129/129, retrieval 128/129.
 [invariant]

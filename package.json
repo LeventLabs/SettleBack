@@ -18,6 +18,7 @@
     "dev:server": "npm run dev -w @settleback/server",
     "demo": "node --env-file-if-exists=.env apps/server/scripts/demo.ts",
     "demo:testnet": "node --env-file-if-exists=.env apps/server/scripts/demo.ts --hsk-testnet",
+    "demo:keys": "node --env-file-if-exists=.env apps/server/scripts/demo-keys.ts",
     "dev:web": "npm run dev -w @settleback/web",
     "contracts:build": "forge build --root contracts"
   },

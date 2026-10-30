@@ -20,10 +20,11 @@ Deterministic rules settle the clear cases. When they abstain, Claude reads the 
 npm install
 npm run demo          # disposable anvil chain, the registry, four seeded cases, and "Buy a job"
 npm run demo:testnet  # the same cases, with the registry steps on HSK Chain testnet
+npm run demo:hsp      # jobs bought and repaid through HSP Agentic Payment on HSK Chain testnet
 npm run dev:web       # in a second terminal, then open http://localhost:5173
 ```
 
-`npm run demo` needs no configuration and no keys. Without `ANTHROPIC_API_KEY` in `.env`, requests for a cited assessment are recorded as failed; the recorded live runs are in [evaluation](evaluation/README.md). Requirements, wallet setup, and running the testnet demo with your own registry are under [Development](#development).
+`npm run demo` needs no configuration and no keys. Without `ANTHROPIC_API_KEY` in `.env`, requests for a cited assessment are recorded as failed; the recorded live runs are in [evaluation](evaluation/README.md). `npm run demo:hsp` needs an allowlisted address at HSP and test USDC; see [Paying through HSP](#paying-through-hsp-on-testnet). Requirements, wallet setup, and running the testnet demo with your own registry are under [Development](#development).
 
 ## What is real and what is simulated
 
@@ -32,10 +33,11 @@ npm run dev:web       # in a second terminal, then open http://localhost:5173
 | `RecoveryRegistry` contract | Deployed on HSK Chain testnet (133), verified on Sourcify and Blockscout, with Foundry unit, fuzz, and invariant tests. The main deployment [`0xcC1A…996C`](https://testnet-explorer.hskchain.net/address/0xcC1A01Fe331D65b683d8caB377c49e63Dcb6996C) has recorded no recovery yet. The demo deployment [`0xf1F8…de34`](https://testnet-explorer.hskchain.net/address/0xf1F8FD66A678693C1Ff02611c285ba105562de34) holds the real registration, reservation, and outcome transactions of `npm run demo:testnet`, whose cases reference simulated payments. |
 | Deployment marker on HSK Chain mainnet (177) | Not deployed yet. The registry goes to mainnet only after a security review. |
 | Wallet sign-in, roles, case workspace | Real: EIP-4361 sign-in with a browser wallet, and role checks on every case, recovery, and delivery route. |
-| Paying for a job ("Buy a job") | The seller's receiving agent quotes with a merchant-signed Cart Mandate; the buyer's Payment Agent reports each check as passed, blocked, or not checked; the buyer's wallet signs a real EIP-712 authorization. The gateway that executes it is simulated. |
+| Paying for a job ("Buy a job") | In `npm run demo` and `demo:testnet`, the seller's receiving agent quotes with a merchant-signed Cart Mandate, the buyer's Payment Agent reports each check as passed, blocked, or not checked, the buyer's wallet signs a real EIP-712 authorization, and the gateway that executes it is simulated. In `npm run demo:hsp`, HSP Agentic Payment creates the order and prepares the authorization, the Payment Agent checks every field of it before the wallet signs, and HSP's gateway broadcasts the transfer on HSK Chain testnet. |
 | Repayment authorization | A real EIP-712 signature in the seller's wallet: an EIP-3009 `TransferWithAuthorization` under the HSK Chain testnet USDC domain, which a test pins to the value read from the token contract. |
-| HSP Merchant gateway | Simulated. The simulator follows the public documentation (Cart Mandate, merchant JWT, signed requests, payment statuses, webhooks). The Payment Mandate submission endpoint is not published and merchant access is pending, so no payment has gone through HSP. |
-| Payments and their chain | Simulated by the gateway simulator and its own chain; the transfer hashes shown are the simulator's. |
+| HSP Agentic Payment (QA) | Integrated through its MCP tools (`create_order`, `prepare_payment`, `finalize_payment`, `submit_payment`, `query_payment`, and the rest) by a dependency-free Streamable HTTP client, and tested against a stand-in that follows HSP's setup guide. HSP holds the merchant credentials and signs the cart. The first live payment waits for HSP's QA allowlisting; until one is linked here, no payment has gone through HSP. |
+| HSP Merchant gateway (merchant API) | Simulated for `npm run demo` and `demo:testnet`. The simulator follows the public documentation (Cart Mandate, merchant JWT, signed requests, payment statuses, webhooks). |
+| Payments and their chain | Simulated in `npm run demo` and `demo:testnet`; the transfer hashes shown there are the simulator's. In `npm run demo:hsp`, HSP's gateway broadcasts real testnet USDC transfers, and each is verified on HSK Chain testnet: the receipt, the token's Transfer event, and the AuthorizationUsed event for the nonce the payer signed. |
 | Job service, logs, artifacts | Synthetic but executed: a real extraction job runs with injected faults, and the evidence comes from running it. A purchase names its demo scenario before it is paid, and the scenario is never evidence. Only buyer claims in the seeded cases are hand-written, and they are labeled. |
 | Claude assessment | Live when `ANTHROPIC_API_KEY` is set (`claude-opus-5-5`); recorded runs are in [evaluation](evaluation/README.md). |
 | Automatic repayment under a seller's standing policy | Supported and tested in the contract; the guarded signer that would use it is not built. |
@@ -45,7 +47,7 @@ No completed live payment, mainnet deployment, or production readiness is claime
 ## Architecture and trust boundaries
 
 ```
-buyer wallet ──┐                         ┌── HSP gateway (simulated) ── payment chain (simulated)
+buyer wallet ──┐                         ┌── HSP Agentic Payment (or its simulator) ── payment chain
 seller wallet ─┼── case workspace ── SettleBack server ── RecoveryRegistry on HSK Chain
 operator ──────┘    (React, browser)     │  (Fastify, SQLite)
                                          └── Claude (assessment only, no tools)
@@ -54,6 +56,7 @@ operator ──────┘    (React, browser)     │  (Fastify, SQLite)
 - The server decides case state. The browser displays it and asks wallets to sign; nothing a request says can grant a role.
 - Buyer and seller keys stay in their wallets. The server holds only the verifier key, which registers cases, reserves retrievals, and records outcomes; it cannot reserve a repayment, act for a seller, or move funds.
 - A payment counts as settled only when the gateway record and the on-chain transfer agree. Contradictions freeze the payment for a person.
+- When HSP prepares the EIP-712 authorization, the payer's Payment Agent checks it before the wallet sees it: the token's pinned domain (confirmed against the token's own `DOMAIN_SEPARATOR` at startup), the exact EIP-3009 type, payer, recipient, an amount between the price and the price plus the maximum fee, and the validity windows. The attempt's one execution permit is consumed before the signature leaves the server, so a lost answer is observed, never sent again.
 - The model has no tools and authorizes nothing. Its quotes are matched byte for byte in the stored evidence, and an artifact it names must be confirmed by the job service and the artifact store.
 - The registry holds no tokens and has no owner or upgrade path. The verifier is trusted to record truthfully; reservations by the seller are confirmed from the chain.
 
@@ -117,6 +120,19 @@ npm run demo:testnet
 
 The deployer pays about 0.006 testnet HSK and has no authority over the registry. If the registry's verifier is not your verifier key, the demo stops and says so before the server starts.
 
+#### Paying through HSP on testnet
+
+`npm run demo:hsp` pays for real on HSK Chain testnet through [HSP Agentic Payment](https://mcp-qa.hashkeymerchant.com/). There are no seeded cases: every case comes from a job bought in the workspace, and a refundable failure is repaid through HSP from the seller's wallet. HSP's QA endpoint accepts only addresses it has allowlisted, so either run from an allowlisted address or point `SETTLEBACK_HSP_MCP_URL` at a relay that runs on one; a relay token is read from `~/.config/settleback/hsp-relay.token` (or `SETTLEBACK_HSP_RELAY_TOKEN_FILE`), readable only by its owner, and sent as the `X-Settleback-Relay` header.
+
+```bash
+npm run demo:keys    # if you have no demo keys yet; fund the verifier and seller with testnet HSK
+npm run hsp:check    # reads only: HSP's tools and live schemas, its USDC token, and both balances
+npm run demo:hsp     # same registry and keys as demo:testnet; records are kept in data/
+npm run dev:web
+```
+
+The buyer pays and the seller repays in HSP's test USDC, at the exact contract `get_chain_config` names; `npm run hsp:check` prints it and both balances. Neither pays gas for a payment: HSP's gateway broadcasts it. `SETTLEBACK_HSP_MERCHANT_NAME` (default `SettleBack`) is the team name HSP aggregates payments by, used unchanged at order creation and in every query. The server refuses to start unless HSP lists all eight tools, its chain configuration names exactly one USDC token on chain 133, and that token's `DOMAIN_SEPARATOR` matches the pinned EIP-712 domain. The workspace shows HSP's authorization (recipient, payer, and the exact raw amount) before the wallet signs it and again before it is submitted, as HSP's guide asks, and links each verified transfer to the explorer. Payment status is queried every 15 seconds, as HSP asks.
+
 "Buy a job" starts a new operation from the signed-in wallet. The buyer picks a demo scenario first (the response is lost after the job completes, the job fails, the job finishes after the response deadline, or it completes normally); it configures the faults the demo's job service runs with and is shown as a badge, but the case only ever receives the records the components actually write. The seller's receiving agent quotes with a merchant-signed Cart Mandate, and the buyer's Payment Agent shows every check it made against the pinned merchant key, the order, and the demo buyer's spending limits: passed, blocked with its reason, or not checked because an earlier failure made it moot. A blocked check stops the purchase before anything is signed. The buyer's wallet then signs the EIP-3009 authorization inside an AP2 Payment Mandate, once, with the same idempotency rules as a repayment; the gateway simulator executes it, and the job starts only after reconciliation verifies the payment against the gateway and its chain. An unknown payment never starts the job. When the job answers with an error, or its response deadline (12 seconds) passes, the gateway record and the components' records are stored and one case opens for the operation; records written later, such as a job finishing after the deadline, reach the same case. The page follows the server's state, survives a refresh, and links to the case.
 
 The workspace signs in with the browser wallet and lists only the cases the account is party to (every case for an operator). Each case keeps the payment, execution, and delivery records in separate lanes. It shows what the deterministic rules found, with their quotes, and a cited assessment when the rules abstain. It also shows the one recovery the case may have: its fixed terms, where it stands, and the next step for the signed-in party. The seller approves a per-case repayment by sending the registry reservation from its own wallet and then pays it by signing the repayment's EIP-3009 authorization in the same wallet. The buyer downloads the recovered result, sees the digest the browser computed beside the expected one, and can acknowledge only a match. A state shows as done only once the chain and the registry confirm it. Changing the wallet's account signs the user out. The buyer sees evidence digests and the rules' quotes from the bound terms, but not the seller's records.
@@ -128,7 +144,7 @@ The server runs its TypeScript sources directly with Node's built-in type stripp
 | `apps/server` | Fastify API, SQLite storage, and the Claude assessment client |
 | `apps/web` | React + Vite case workspace |
 | `packages/domain` | Shared domain types, state machines with per-transition actor rules, deterministic recovery checks, evidence validation and redaction, cited spans, the rules-only assessment, validation and decision rules for the model assessment, canonical JSON and SHA-256 helpers |
-| `packages/adapters` | Payment and registry interfaces, the HSP agent-to-agent payment flow, webhook signature verification, settlement verification against the chain, the EVM registry adapter, and a deterministic gateway simulator with fault injection |
+| `packages/adapters` | Payment and registry interfaces, the HSP agent-to-agent payment flow, an MCP Streamable HTTP client and the HSP Agentic Payment rail, webhook signature verification, settlement verification against the chain, the EVM registry and token-transfer readers, and a deterministic gateway simulator with fault injection |
 | `packages/demo-service` | The paid extraction job: an edge proxy, a job service, a worker, and an artifact store, each keeping its own records, run in simulated time with injectable faults |
 | `fixtures` | Synthetic service terms with their machine-readable refund rules, a source document with its expected result, labeled recovery cases, and signing-policy cases |
 | `migrations` | SQLite schema; applied in order at startup and refused if an applied file changes |

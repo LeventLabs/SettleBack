@@ -558,6 +558,20 @@ pre {
   font-size: 0.88rem;
 }
 
+.action__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.authorization {
+  margin-top: 0.75rem;
+}
+
+.authorization code {
+  overflow-wrap: anywhere;
+}
+
 .steps {
   list-style: none;
   margin: 0.75rem 0;

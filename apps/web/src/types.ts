@@ -10,6 +10,7 @@ export interface Health {
   paymentChainId: number;
   registryChainId: number;
   paymentWrites: "enabled" | "disabled";
+  paymentGateway: "simulated" | "hsp-agentic" | "none";
   registry: { status: "connected"; chainId: number; address: string; provenance: string } | { status: "not configured" };
 }
 
@@ -140,7 +141,7 @@ export interface CaseView {
   relations: Relation[];
   status: string;
   revision: number;
-  operation: { buyer: string; seller: string; serviceId: string; policyId: string; chainId: number; token: string; priceUsd: string; amountBaseUnits: string; createdAt: string };
+  operation: { environment: string; buyer: string; seller: string; serviceId: string; policyId: string; chainId: number; token: string; tokenDecimals: number; priceUsd: string; amountBaseUnits: string; createdAt: string };
   originalPayment: { id: string; state: string } | null;
   evidence: { revision: number; sha256: string; items: EvidenceItem[] };
   rules: RulesResult | null;
@@ -174,6 +175,7 @@ export interface PurchaseView {
     cartMandateId: string;
     paymentRequestId: string;
     cartSha256: string;
+    flowId: string | null;
     expiresAt: string;
     maxFeeBaseUnits: string;
     grossLimitBaseUnits: string | null;
@@ -182,10 +184,45 @@ export interface PurchaseView {
     dailyCapBaseUnits: string;
   } | null;
   checks: PurchaseCheck[];
+  authorization: AuthorizationSummary | null;
+  payments: PaymentsInfo;
   payment: PaymentView | null;
   signatureSubmittedAt: string | null;
   run: { startedAt: string; deadlineAt: string; response: { status: number; at: string } | null } | null;
   events: { at: string; kind: PurchaseEventKind }[];
   caseId: string | null;
   done: boolean;
+}
+
+/** What a wallet is about to authorize, as the server checked it. */
+export interface AuthorizationSummary {
+  recipient: string;
+  payer: string;
+  /** Raw token units, exactly as authorized. */
+  amountBaseUnits: string;
+  quoteExpiresAt: string | null;
+  preparedBy: "payment-agent" | "hsp";
+}
+
+export interface PaymentsInfo {
+  gateway: "simulated" | "hsp-agentic";
+  provenance: "SIMULATED" | "LIVE";
+  chainId: number;
+  token: string;
+  tokenDecimals: number;
+  coin: string;
+}
+
+/** The typed data a wallet signs (eth_signTypedData_v4). */
+export interface TypedData {
+  domain: { name: string; version: string; chainId: number; verifyingContract: string };
+  types: Record<string, unknown>;
+  primaryType: string;
+  message: Record<string, unknown>;
+}
+
+export interface SignatureRequest {
+  status: string;
+  typedData?: TypedData;
+  authorization?: AuthorizationSummary;
 }

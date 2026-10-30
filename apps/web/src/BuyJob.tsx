@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { api, describeError } from "./api.ts";
-import { networkName, short, stateLabel, when, type Tone } from "./format.ts";
-import type { Health, PurchaseCheck, PurchaseView, Session } from "./types.ts";
+import { AuthorizationReview, type PendingAuthorization } from "./Authorization.tsx";
+import { explorerLink, networkName, short, stateLabel, when, type Tone } from "./format.ts";
+import type { Health, PurchaseCheck, PurchaseView, Session, SignatureRequest, TypedData } from "./types.ts";
 import { usePoll } from "./usePoll.ts";
 import { signTypedData, switchChain, type WalletAccount } from "./wallet.ts";
 
@@ -74,8 +75,9 @@ function time(iso: string): string {
 
 /**
  * Buying a job from the workspace. The seller's receiving agent quotes, the buyer's Payment Agent
- * checks the quote, the buyer's wallet authorizes the payment, the (simulated) gateway executes it,
- * and the job runs. Every stage follows the server's state; nothing here advances on a timer.
+ * checks the quote and the authorization, the buyer's wallet signs it, the gateway (simulated, or
+ * HSP on HSK Chain testnet) executes it, and the job runs. Every stage follows the server's state;
+ * nothing here advances on a timer.
  */
 export function BuyJob({ session, wallet, health, onViewCase }: { session: Session; wallet: WalletAccount | null; health: Health; onViewCase: (caseId: string) => void }) {
   const [operationId, setOperationId] = useState<string | null>(() => readStored(session.address).operationId ?? null);
@@ -89,6 +91,8 @@ export function BuyJob({ session, wallet, health, onViewCase }: { session: Sessi
   );
   const view = purchase.data ?? null;
   const registryLive = health.registry.status === "connected" && health.registry.provenance === "LIVE";
+  const live = view === null ? health.paymentGateway === "hsp-agentic" : view.payments.gateway === "hsp-agentic";
+  const [pending, setPending] = useState<PendingAuthorization | null>(null);
 
   async function run(label: string, work: () => Promise<string | { tone: Tone; text: string } | void>): Promise<void> {
     setWorking(label);
@@ -117,21 +121,56 @@ export function BuyJob({ session, wallet, health, onViewCase }: { session: Sessi
     });
   }
 
+  /** Signs on the chain the authorization's domain names; wallets sign typed data only there. */
+  async function signOnPaymentChain(typedData: TypedData): Promise<{ signature: string; signer: WalletAccount }> {
+    if (wallet === null) throw new Error("Connect your wallet first.");
+    const paymentChain = typedData.domain.chainId;
+    if (wallet.chainId !== paymentChain) await switchChain(paymentChain);
+    const signer = { ...wallet, chainId: paymentChain };
+    return { signature: await signTypedData(signer, typedData), signer };
+  }
+
+  async function submit(operation: string, signature: string, signer: WalletAccount): Promise<string | { tone: Tone; text: string }> {
+    const outcome = await api<{ status: string; reason?: string }>(`/api/purchases/${encodeURIComponent(operation)}/authorize/signature`, { method: "POST", body: { signature }, wallet: signer });
+    if (outcome.status === "SUBMITTED") return live ? "HSP accepted the payment once. The job starts when HSP's record and the transfer on HSK Chain testnet agree." : "Your authorization was submitted once. The job starts when the payment is verified.";
+    if (outcome.status === "ALREADY_REQUESTED") return "This authorization was already submitted; it is not paid twice.";
+    return { tone: "attention", text: `The submission's outcome is unknown (${outcome.reason ?? "no reason given"}). It is reconciled from the gateway and the chain; the job does not start until the payment is verified.` };
+  }
+
   async function authorize(): Promise<void> {
     if (wallet === null || view === null) return;
-    const base = `/api/purchases/${encodeURIComponent(view.operationId)}`;
+    const operation = view.operationId;
     await run("authorize", async () => {
-      const requested = await api<{ status: string; typedData?: { domain: { chainId: number } } }>(`${base}/authorize`, { method: "POST", wallet });
-      if (requested.status !== "SIGNATURE_REQUIRED" || requested.typedData === undefined) return "This payment was already authorized; it is not paid twice.";
-      // The authorization names the payment chain; wallets sign typed data only on the chain its domain names.
-      const paymentChain = requested.typedData.domain.chainId;
-      if (wallet.chainId !== paymentChain) await switchChain(paymentChain);
-      const signer = { ...wallet, chainId: paymentChain };
-      const signature = await signTypedData(signer, requested.typedData);
-      const outcome = await api<{ status: string; reason?: string }>(`${base}/authorize/signature`, { method: "POST", body: { signature }, wallet: signer });
-      if (outcome.status === "SUBMITTED") return "Your authorization was submitted once. The job starts when the payment is verified.";
-      if (outcome.status === "ALREADY_REQUESTED") return "This authorization was already submitted; it is not paid twice.";
-      return { tone: "attention", text: `The submission's outcome is unknown (${outcome.reason ?? "no reason given"}). It is reconciled from the gateway and the chain; the job does not start until the payment is verified.` };
+      const requested = await api<SignatureRequest>(`/api/purchases/${encodeURIComponent(operation)}/authorize`, { method: "POST", wallet });
+      if (requested.status !== "SIGNATURE_REQUIRED" || requested.typedData === undefined || requested.authorization === undefined) return "This payment was already authorized; it is not paid twice.";
+      // HSP's authorization is reviewed, signed, and submitted in separate steps the buyer confirms.
+      if (requested.authorization.preparedBy === "hsp") {
+        setPending({ typedData: requested.typedData, authorization: requested.authorization, signature: null });
+        return;
+      }
+      const { signature, signer } = await signOnPaymentChain(requested.typedData);
+      return submit(operation, signature, signer);
+    });
+  }
+
+  async function signPending(): Promise<void> {
+    if (pending === null) return;
+    await run("sign", async () => {
+      const { signature } = await signOnPaymentChain(pending.typedData);
+      setPending({ ...pending, signature });
+    });
+  }
+
+  async function submitPending(): Promise<void> {
+    if (pending === null || pending.signature === null || view === null || wallet === null) return;
+    const signature = pending.signature;
+    const operation = view.operationId;
+    await run("submit", async () => {
+      try {
+        return await submit(operation, signature, { ...wallet, chainId: pending.typedData.domain.chainId });
+      } finally {
+        setPending(null);
+      }
     });
   }
 
@@ -139,6 +178,7 @@ export function BuyJob({ session, wallet, health, onViewCase }: { session: Sessi
     writeStored(session.address, {});
     setOperationId(null);
     setMessage(null);
+    setPending(null);
   }
 
   const current = view === null ? -1 : STAGES.findIndex((stage) => stage.id === view.stage);
@@ -157,7 +197,8 @@ export function BuyJob({ session, wallet, health, onViewCase }: { session: Sessi
           )}
         </div>
         <p className="case-header__role">
-          Structured extraction of a supplier price note, from SettleBack Demo Seller, for $1.00. Your Payment Agent checks the seller's quote; your wallet authorizes the payment.
+          Structured extraction of a supplier price note, from SettleBack Demo Seller, for $1.00. Your Payment Agent checks the seller's quote; your wallet authorizes the payment
+          {live ? ", and HSP's gateway executes it on HSK Chain testnet." : "."}
         </p>
         <ol className="stepper" aria-label="Purchase progress">
           {STAGES.map((stage, index) => {
@@ -182,13 +223,43 @@ export function BuyJob({ session, wallet, health, onViewCase }: { session: Sessi
       <div className="buy">
         <div className="buy__main">
           {operationId === null ? (
-            <Start scenario={scenario} onScenario={setScenario} onQuote={() => void quote()} busy={working !== null || wallet === null} working={working === "quote"} />
+            <Start live={live} scenario={scenario} onScenario={setScenario} onQuote={() => void quote()} busy={working !== null || wallet === null} working={working === "quote"} />
           ) : view === null ? (
-            <p className="empty panel">Loading the purchase…</p>
+            purchase.error === undefined ? (
+              <p className="empty panel">Loading the purchase…</p>
+            ) : (
+              // A purchase this server no longer knows, for example after a restart, cannot be resumed here.
+              <div className="empty panel">
+                <p>This purchase cannot be loaded from the server.</p>
+                <button type="button" className="button button--quiet" onClick={startOver}>
+                  Start another purchase
+                </button>
+              </div>
+            )
           ) : (
             <>
               <Completed view={view} current={current} />
-              <Current view={view} working={working} canAct={wallet !== null && working === null} onAuthorize={() => void authorize()} onViewCase={onViewCase} />
+              <Current
+                view={view}
+                working={working}
+                canAct={wallet !== null && working === null}
+                onAuthorize={() => void authorize()}
+                onViewCase={onViewCase}
+                review={
+                  pending === null ? null : (
+                    <AuthorizationReview
+                      pending={pending}
+                      decimals={view.payments.tokenDecimals}
+                      symbol={view.payments.coin}
+                      busy={working !== null}
+                      working={working === "sign" ? "sign" : working === "submit" ? "submit" : null}
+                      onSign={() => void signPending()}
+                      onSubmit={() => void submitPending()}
+                      onCancel={() => setPending(null)}
+                    />
+                  )
+                }
+              />
               {finished && (
                 <button type="button" className="button button--quiet buy__again" onClick={startOver}>
                   Start another purchase
@@ -197,18 +268,22 @@ export function BuyJob({ session, wallet, health, onViewCase }: { session: Sessi
             </>
           )}
         </div>
-        <Summary view={view} registryLive={registryLive} registryChainId={health.registry.status === "connected" ? health.registry.chainId : null} />
+        <Summary view={view} live={live} registryLive={registryLive} registryChainId={health.registry.status === "connected" ? health.registry.chainId : null} />
       </div>
     </section>
   );
 }
 
-function Start({ scenario, onScenario, onQuote, busy, working }: { scenario: string; onScenario: (value: string) => void; onQuote: () => void; busy: boolean; working: boolean }) {
+function Start({ live, scenario, onScenario, onQuote, busy, working }: { live: boolean; scenario: string; onScenario: (value: string) => void; onQuote: () => void; busy: boolean; working: boolean }) {
   return (
     <section className="panel" aria-labelledby="start-title">
       <h2 id="start-title">Get a quote</h2>
       <p className="actor">Seller's receiving agent</p>
-      <p>The seller's agent answers with a merchant-signed Cart Mandate for this job: price, token, chain, recipient, and expiry. Nothing is signed or paid yet.</p>
+      <p>
+        {live
+          ? "The seller's agent creates an HSP order for this job: price, token, chain, recipient, and expiry. HSP signs the cart for the team. Nothing is signed or paid yet."
+          : "The seller's agent answers with a merchant-signed Cart Mandate for this job: price, token, chain, recipient, and expiry. Nothing is signed or paid yet."}
+      </p>
       <label className="field">
         <span className="field__label">Demo scenario</span>
         <select value={scenario} onChange={(event) => onScenario(event.target.value)} disabled={busy}>
@@ -247,6 +322,8 @@ function Checks({ checks }: { checks: PurchaseCheck[] }) {
 
 function Completed({ view, current }: { view: PurchaseView; current: number }) {
   const passed = view.checks.filter((check) => check.status === "passed").length;
+  const live = view.payments.gateway === "hsp-agentic";
+  const transferLink = view.payment?.txHash ? explorerLink(view.payments.chainId, "tx", view.payment.txHash) : null;
   return (
     <>
       {current > 0 && (
@@ -264,9 +341,29 @@ function Completed({ view, current }: { view: PurchaseView; current: number }) {
           </summary>
           <dl className="facts facts--stacked">
             <div>
-              <dt>Mandate</dt>
-              <dd>AP2 Payment Mandate (simulated format) carrying an EIP-3009 TransferWithAuthorization</dd>
+              <dt>{live ? "Authorization" : "Mandate"}</dt>
+              <dd>
+                {live
+                  ? "EIP-3009 TransferWithAuthorization prepared by HSP and checked by your Payment Agent; HSP built the AP2 Payment Mandate from your signature"
+                  : "AP2 Payment Mandate (simulated format) carrying an EIP-3009 TransferWithAuthorization"}
+              </dd>
             </div>
+            {view.authorization !== null && (
+              <div>
+                <dt>Authorized amount</dt>
+                <dd>
+                  <code>{view.authorization.amountBaseUnits}</code> raw units
+                </dd>
+              </div>
+            )}
+            {view.quote.flowId !== null && (
+              <div>
+                <dt>HSP flow</dt>
+                <dd>
+                  <code>{view.quote.flowId}</code>
+                </dd>
+              </div>
+            )}
             <div>
               <dt>Payment request</dt>
               <dd>
@@ -290,7 +387,22 @@ function Completed({ view, current }: { view: PurchaseView; current: number }) {
           <dl className="facts facts--stacked">
             <div>
               <dt>Transfer</dt>
-              <dd>{view.payment.txHash === null ? "—" : <code title={view.payment.txHash}>{short(view.payment.txHash, 10)} (simulated chain)</code>}</dd>
+              <dd>
+                {view.payment.txHash === null ? (
+                  "—"
+                ) : live ? (
+                  <>
+                    <code title={view.payment.txHash}>{short(view.payment.txHash, 10)}</code>{" "}
+                    {transferLink !== null && (
+                      <a href={transferLink} target="_blank" rel="noreferrer">
+                        View on explorer
+                      </a>
+                    )}
+                  </>
+                ) : (
+                  <code title={view.payment.txHash}>{short(view.payment.txHash, 10)} (simulated chain)</code>
+                )}
+              </dd>
             </div>
           </dl>
         </details>
@@ -301,11 +413,12 @@ function Completed({ view, current }: { view: PurchaseView; current: number }) {
 
 function paymentStatus(view: PurchaseView): string {
   const state = view.payment?.state;
-  if (state === "VERIFIED") return "Simulated payment verified on the gateway and its chain";
+  const live = view.payments.gateway === "hsp-agentic";
+  if (state === "VERIFIED") return live ? "Verified: HSP's record and the transfer on HSK Chain testnet agree" : "Simulated payment verified on the gateway and its chain";
   if (state === "UNKNOWN") return "Payment outcome unknown";
-  if (state === "OBSERVED") return "Transfer observed on the simulated chain; waiting for finality";
-  if (state === "SUBMITTED") return "The gateway accepted the mandate";
-  if (state === "SIGNING_REQUESTED" && view.signatureSubmittedAt !== null) return "Submitted to the gateway (simulated)";
+  if (state === "OBSERVED") return live ? "Transfer included on HSK Chain testnet; waiting for HSP's final confirmation" : "Transfer observed on the simulated chain; waiting for finality";
+  if (state === "SUBMITTED") return live ? "HSP accepted the payment; waiting for the transfer" : "The gateway accepted the mandate";
+  if (state === "SIGNING_REQUESTED" && view.signatureSubmittedAt !== null) return live ? "Submitted to HSP" : "Submitted to the gateway (simulated)";
   return state === undefined ? "Not started" : stateLabel(state);
 }
 
@@ -313,15 +426,55 @@ function paymentStatus(view: PurchaseView): string {
 function paymentShort(view: PurchaseView | null): string {
   const state = view?.payment?.state;
   if (view === null || state === undefined) return "Not started";
-  if (state === "VERIFIED") return "Verified (simulated)";
+  if (state === "VERIFIED") return view.payments.gateway === "hsp-agentic" ? "Verified on chain" : "Verified (simulated)";
   if (state === "UNKNOWN") return "Outcome unknown";
   if (state === "OBSERVED") return "Observed, awaiting finality";
   if (state === "SUBMITTED") return "Accepted by the gateway";
-  if (state === "SIGNING_REQUESTED") return view.signatureSubmittedAt === null ? "Awaiting your signature" : "Submitted (simulated)";
+  if (state === "SIGNING_REQUESTED") return view.signatureSubmittedAt === null ? "Awaiting your signature" : view.payments.gateway === "hsp-agentic" ? "Submitted to HSP" : "Submitted (simulated)";
   return stateLabel(state);
 }
 
-function Current({ view, working, canAct, onAuthorize, onViewCase }: { view: PurchaseView; working: string | null; canAct: boolean; onAuthorize: () => void; onViewCase: (caseId: string) => void }) {
+function Current({
+  view,
+  working,
+  canAct,
+  onAuthorize,
+  onViewCase,
+  review,
+}: {
+  view: PurchaseView;
+  working: string | null;
+  canAct: boolean;
+  onAuthorize: () => void;
+  onViewCase: (caseId: string) => void;
+  review: ReactNode;
+}) {
+  const live = view.payments.gateway === "hsp-agentic";
+  if (live && (view.stage === "review" || view.stage === "authorize")) {
+    const blocked = view.checks.some((check) => check.status === "blocked");
+    return (
+      <section className="panel" aria-labelledby="stage-title">
+        <h2 id="stage-title">{review === null ? "Review the quote" : "Review HSP's authorization"}</h2>
+        <p className="actor">Your Payment Agent's checks</p>
+        <Checks checks={view.checks} />
+        <p className="panel__aside">
+          HSP signs carts for hackathon teams and holds those keys, so there is no seller key to pin. Instead your agent checks every field of the authorization HSP prepares against this order and this buyer's spending limits, before your wallet sees it.
+        </p>
+        {review ?? (
+          <div className="action">
+            {blocked ? (
+              <p className="action__why inline-error">A check failed, so nothing can be signed.</p>
+            ) : (
+              <p className="action__why">HSP prepares an EIP-3009 authorization for this order. Your agent checks it, then shows you the recipient, payer, and exact amount before anything is signed.</p>
+            )}
+            <button type="button" className="button" disabled={!canAct || blocked} onClick={onAuthorize}>
+              {working === "authorize" ? "HSP is preparing the authorization…" : "Prepare authorization"}
+            </button>
+          </div>
+        )}
+      </section>
+    );
+  }
   if (view.stage === "review" || view.stage === "authorize") {
     const blocked = view.checks.some((check) => check.status !== "passed");
     return (
@@ -351,7 +504,7 @@ function Current({ view, working, canAct, onAuthorize, onViewCase }: { view: Pur
     return (
       <section className="panel" aria-labelledby="stage-title">
         <h2 id="stage-title">Payment</h2>
-        <p className="actor">Payment gateway (simulated)</p>
+        <p className="actor">{live ? "HSP Agentic Payment gateway · HSK Chain testnet" : "Payment gateway (simulated)"}</p>
         <p className={unknown ? "chip chip--attention" : "chip chip--pending"}>{paymentStatus(view)}</p>
         {unknown ? (
           <p>The job will not start. The attempt is reconciled from the gateway and the chain and is never paid twice.</p>
@@ -398,7 +551,7 @@ function Current({ view, working, canAct, onAuthorize, onViewCase }: { view: Pur
   );
 }
 
-function Summary({ view, registryLive, registryChainId }: { view: PurchaseView | null; registryLive: boolean; registryChainId: number | null }) {
+function Summary({ view, live, registryLive, registryChainId }: { view: PurchaseView | null; live: boolean; registryLive: boolean; registryChainId: number | null }) {
   return (
     <aside className="panel buy__summary" aria-label="Order summary">
       <h2>Order</h2>
@@ -439,7 +592,11 @@ function Summary({ view, registryLive, registryChainId }: { view: PurchaseView |
         )}
       </dl>
       <ul className="provenance">
-        <li className="badge badge--simulated">Payment gateway and payment chain: simulated</li>
+        {live ? (
+          <li className="badge badge--live">Payments: HSP Agentic Payment on HSK Chain testnet</li>
+        ) : (
+          <li className="badge badge--simulated">Payment gateway and payment chain: simulated</li>
+        )}
         <li className={registryLive ? "badge badge--live" : "badge"}>Recovery registry: {registryLive && registryChainId !== null ? networkName(registryChainId) : "local chain (simulated)"}</li>
       </ul>
     </aside>

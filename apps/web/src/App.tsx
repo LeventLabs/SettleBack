@@ -97,7 +97,13 @@ export function App() {
           {ready !== undefined && (
             <>
               <span className={ready.mode === "simulated" ? "badge badge--simulated" : "badge badge--live"}>
-                {ready.mode !== "simulated" ? "Live" : ready.registry.status === "connected" && ready.registry.provenance === "LIVE" ? "Payment funds simulated · registry uses testnet HSK" : "Simulation · no real funds"}
+                {ready.mode !== "simulated"
+                  ? ready.paymentGateway === "hsp-agentic"
+                    ? "Live · payments through HSP on testnet"
+                    : "Live"
+                  : ready.registry.status === "connected" && ready.registry.provenance === "LIVE"
+                    ? "Payment funds simulated · registry uses testnet HSK"
+                    : "Simulation · no real funds"}
               </span>
               <span className="badge">{ready.networkLabel}</span>
               {ready.registry.status === "connected" ? <RegistryBadge chainId={ready.registry.chainId} address={ready.registry.address} live={ready.registry.provenance === "LIVE"} /> : <span className="badge">No registry</span>}

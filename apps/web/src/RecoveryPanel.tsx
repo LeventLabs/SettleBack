@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { api, retrieveResult, type DeliveredResult } from "./api.ts";
+import { AuthorizationReview, type PendingAuthorization } from "./Authorization.tsx";
 import type { Runner } from "./CaseWorkspace.tsx";
 import { actionLabel, explorerLink, short, stateLabel, toneOf, when } from "./format.ts";
-import type { ActionView, CaseView } from "./types.ts";
+import type { ActionView, CaseView, SignatureRequest, TypedData } from "./types.ts";
 import { sendTransaction, signTypedData, switchChain, type WalletAccount } from "./wallet.ts";
 
 const STEPS: Record<"RETRIEVE" | "REPAY", { state: string; label: string }[]> = {
@@ -145,6 +146,9 @@ function Steps({ action }: { action: ActionView }) {
 }
 
 function NextStep({ data, action, wallet, runner, isSeller }: { data: CaseView; action: ActionView; wallet: WalletAccount | null; runner: Runner; isSeller: boolean }) {
+  const [pending, setPending] = useState<PendingAuthorization | null>(null);
+  // A live operation is paid through HSP; the local demo's through the gateway simulator.
+  const live = data.operation.environment !== "local";
   const isBuyer = data.relations.includes("buyer");
   const [reported, setReported] = useState<string | null>(null);
   const [delivered, setDelivered] = useState<DeliveredResult | null>(null);
@@ -178,21 +182,54 @@ function NextStep({ data, action, wallet, runner, isSeller }: { data: CaseView; 
     return "The reservation is not mined yet. Check again in a moment.";
   }
 
+  /** Signs on the chain the authorization's domain names; wallets sign typed data only there. */
+  async function signOnPaymentChain(account: WalletAccount, typedData: TypedData): Promise<{ signature: string; signer: WalletAccount }> {
+    const paymentChain = typedData.domain.chainId;
+    if (account.chainId !== paymentChain) await switchChain(paymentChain);
+    const signer = { ...account, chainId: paymentChain };
+    // The wallet signs an EIP-3009 authorization of exactly this transfer; the server checks it before submitting.
+    return { signature: await signTypedData(signer, typedData), signer };
+  }
+
+  async function submitRepayment(signature: string, signer: WalletAccount): Promise<string | { tone: "attention"; text: string }> {
+    const outcome = await api<{ status: string; reason?: string }>(`${base}/recovery/repay/signature`, { method: "POST", body: { signature }, wallet: signer });
+    if (outcome.status === "SUBMITTED") return "Your authorization was submitted once. The case closes after the transfer is final on chain and the registry records it.";
+    if (outcome.status === "ALREADY_REQUESTED") return "This authorization was already submitted; it is not paid twice.";
+    return { tone: "attention", text: `The submission's outcome is unknown (${outcome.reason ?? "no reason given"}). It is reconciled from the gateway and the chain, never paid twice.` };
+  }
+
   async function repay() {
     if (wallet === null) return;
     await runner.run("repay", async () => {
-      const requested = await api<{ status: string; typedData?: { domain: { chainId: number } } }>(`${base}/recovery/repay`, { method: "POST", wallet });
+      const requested = await api<SignatureRequest>(`${base}/recovery/repay`, { method: "POST", wallet });
       if (requested.status !== "SIGNATURE_REQUIRED" || requested.typedData === undefined) return "This repayment was already submitted; it is not paid twice.";
-      // The authorization names the payment chain; wallets sign typed data only on the chain its domain names.
-      const paymentChain = requested.typedData.domain.chainId;
-      if (wallet.chainId !== paymentChain) await switchChain(paymentChain);
-      const signer = { ...wallet, chainId: paymentChain };
-      // The wallet signs an EIP-3009 authorization of exactly this transfer; the server checks it before submitting.
-      const signature = await signTypedData(signer, requested.typedData);
-      const outcome = await api<{ status: string; reason?: string }>(`${base}/recovery/repay/signature`, { method: "POST", body: { signature }, wallet: signer });
-      if (outcome.status === "SUBMITTED") return "Your authorization was submitted once. The case closes after the transfer is final on chain and the registry records it.";
-      if (outcome.status === "ALREADY_REQUESTED") return "This authorization was already submitted; it is not paid twice.";
-      return { tone: "attention", text: `The submission's outcome is unknown (${outcome.reason ?? "no reason given"}). It is reconciled from the gateway and the chain, never paid twice.` };
+      // HSP's authorization is reviewed, signed, and submitted in separate steps the seller confirms.
+      if (requested.authorization?.preparedBy === "hsp") {
+        setPending({ typedData: requested.typedData, authorization: requested.authorization, signature: null });
+        return;
+      }
+      const { signature, signer } = await signOnPaymentChain(wallet, requested.typedData);
+      return submitRepayment(signature, signer);
+    });
+  }
+
+  async function signPending() {
+    if (wallet === null || pending === null) return;
+    await runner.run("repay-sign", async () => {
+      const { signature } = await signOnPaymentChain(wallet, pending.typedData);
+      setPending({ ...pending, signature });
+    });
+  }
+
+  async function submitPending() {
+    if (wallet === null || pending === null || pending.signature === null) return;
+    const signature = pending.signature;
+    await runner.run("repay-submit", async () => {
+      try {
+        return await submitRepayment(signature, { ...wallet, chainId: pending.typedData.domain.chainId });
+      } finally {
+        setPending(null);
+      }
     });
   }
 
@@ -234,7 +271,35 @@ function NextStep({ data, action, wallet, runner, isSeller }: { data: CaseView; 
       );
     }
     if (action.state === "PREPARED") return <p className="panel__aside">Waiting for the seller to approve the reservation from its wallet.</p>;
-    const awaitingSignature = action.state === "EXECUTION_REQUESTED" && data.repayment?.state === "SIGNING_REQUESTED";
+    // The simulated gateway's mandate is issued before it is signed; HSP's authorization is claimed only when submitted.
+    const awaitingSignature = !live && action.state === "EXECUTION_REQUESTED" && data.repayment?.state === "SIGNING_REQUESTED";
+    if (live && action.state === "RESERVED" && isSeller && pending !== null) {
+      return (
+        <AuthorizationReview
+          pending={pending}
+          decimals={data.operation.tokenDecimals}
+          symbol="USDC"
+          busy={runner.working !== null}
+          working={runner.working === "repay-sign" ? "sign" : runner.working === "repay-submit" ? "submit" : null}
+          onSign={() => void signPending()}
+          onSubmit={() => void submitPending()}
+          onCancel={() => setPending(null)}
+        />
+      );
+    }
+    if (live && action.state === "RESERVED" && isSeller) {
+      return (
+        <div className="action">
+          <p className="action__why">
+            Pay a new transfer of ${data.operation.priceUsd} from your account to the buyer who paid, through HSP on HSK Chain testnet. HSP prepares an EIP-3009 authorization; your Payment Agent checks
+            that it pays exactly the buyer, this amount, and this token before your wallet sees it. You confirm it twice: once to sign, once to submit.
+          </p>
+          <button type="button" className="button" disabled={busy} onClick={() => void repay()}>
+            {runner.working === "repay" ? "HSP is preparing the authorization…" : "Pay the repayment"}
+          </button>
+        </div>
+      );
+    }
     if ((action.state === "RESERVED" || awaitingSignature) && isSeller) {
       return (
         <div className="action">
@@ -298,14 +363,17 @@ function NextStep({ data, action, wallet, runner, isSeller }: { data: CaseView; 
   return <p className="chip chip--done">Recovered and recorded on the registry.</p>;
 }
 
-/** Registry transactions link to the explorer when the registry is on HSK Chain; the simulated transfer never does. */
+/** Registry transactions, and transfers paid through HSP, link to the explorer; the simulated transfer never does. */
 function References({ data, action }: { data: CaseView; action: ActionView }) {
   const registryChain = action.proposal.registry.chainId;
   const rows: { label: string; value: string; link: string | null }[] = [];
   const registryRow = (label: string, value: string) => rows.push({ label, value, link: explorerLink(registryChain, "tx", value) });
   if (action.approvalTx !== null) registryRow(action.action === "RETRIEVE" ? "Verifier's reservation" : "Seller's reservation", action.approvalTx);
   if (action.policyTx !== null) registryRow("Delegate's reservation", action.policyTx);
-  if (data.repayment?.txHash) rows.push({ label: "Repayment transfer (simulated chain)", value: data.repayment.txHash, link: null });
+  if (data.repayment?.txHash) {
+    const live = data.operation.environment !== "local";
+    rows.push({ label: live ? "Repayment transfer (through HSP)" : "Repayment transfer (simulated chain)", value: data.repayment.txHash, link: live ? explorerLink(data.operation.chainId, "tx", data.repayment.txHash) : null });
+  }
   if (action.registryTx !== null) registryRow("Registry outcome", action.registryTx);
   if (rows.length === 0) return null;
   return (

@@ -6,8 +6,12 @@ import {
   assertProvenanceAllowed,
   validateCartMandate,
   type Ap2MandatePayload,
+  type HspAgenticRail,
+  type OfferCheck,
+  type OfferExpectations,
   type PaymentRail,
   type PinnedMerchant,
+  type Provenance,
   type RegistryCase,
   type RegistryGateway,
   type RegistryWrite,
@@ -24,12 +28,15 @@ import { getPaymentAttempt, type PaymentAttemptRecord } from "../db/payments.ts"
 import { insertProofAllocation } from "../db/proofs.ts";
 import { ExecutionRefusedError, claimExecution, executePayment, mandateDigest, type PaymentSigner } from "../payments/execution.ts";
 import { markPrepared } from "../payments/quote.ts";
+import { hspCartExpiryOf, hspOrderInput, offerAuthorization, orderAttempt, singleTransferPolicy, submitAuthorization } from "../payments/hsp-authorization.ts";
+import type { AuthorizationSummary } from "../payments/purchase-payments.ts";
 import { attemptMandate, cartExpiryOf, submitWalletSignature } from "../payments/wallet-signing.ts";
 import { freshness, moveCase, registrationTerms, requireRegistry, termsMismatch } from "./actions.ts";
 import type { OutcomeRecording } from "./retrieval.ts";
 
 /** How a repayment is paid: the rail, the payer's signer, and what the seller's Payment Agent accepts. */
 export interface RepaymentPayments {
+  kind?: "simulated";
   rail: PaymentRail;
   signer: PaymentSigner;
   /** The receiving agent whose Cart Mandate the seller's Payment Agent accepts for a repayment. */
@@ -41,6 +48,17 @@ export interface RepaymentPayments {
   /** The most the seller pays in fees on top of the principal. */
   maxFeeBaseUnits: string;
 }
+
+/** Repayments through HSP Agentic Payment: HSP prepares the authorization, the seller's Payment Agent checks it, the seller's wallet signs it. */
+export interface HspRepaymentPayments {
+  kind: "hsp-agentic";
+  rail: HspAgenticRail;
+  deploymentId: string;
+  /** The most the seller pays in fees on top of the principal. */
+  maxFeeBaseUnits: string;
+}
+
+export type AnyRepaymentPayments = RepaymentPayments | HspRepaymentPayments;
 
 export interface RequestRepaymentInput {
   caseId: string;
@@ -75,67 +93,10 @@ interface StagedRepayment {
  * already requested is returned as such.
  */
 async function stageRepayment(db: DatabaseSync, input: RequestRepaymentInput): Promise<StagedRepayment | { already: RecoveryActionRecord; attempt: PaymentAttemptRecord | undefined }> {
-  const newId = input.newId ?? randomUUID;
-  const read = readTransaction(db, () => {
-    const action = getRecoveryActionForCase(db, input.caseId);
-    if (action === undefined) throw new RecoveryRefusedError("ACTION_NOT_FOUND", `Case ${input.caseId} has no recovery action.`);
-    if (action.action !== "REPAY") throw new RecoveryRefusedError("WRONG_ACTION_STATE", "Only a repayment is paid.");
-    const operation = requireOperation(db, action);
-    if (input.requestedBy.toLowerCase() !== operation.seller) throw new RecoveryRefusedError("ROLE_FORBIDDEN", "Only the seller pays a repayment from its own account.");
-    const registry = requireRegistry(input.registry, action.proposal);
-    if (REQUESTED.includes(action.state)) return { kind: "already" as const, action, attempt: liveAttempt(db, action) };
-    if (action.state !== "RESERVED") throw new RecoveryRefusedError("WRONG_ACTION_STATE", `The repayment is ${action.state}; it can be paid only once reserved.`);
-    if (action.authorizationMode !== "PER_CASE") {
-      throw new RecoveryRefusedError("NOT_EXECUTABLE", "A standing-policy repayment is paid by the seller's guarded signer, which is not connected.");
-    }
-    assertExecutable(db, action, input.now());
-    return { kind: "ready" as const, action, operation, registry, transfer: requireTransfer(action) };
-  });
-  if (read.kind === "already") return { already: read.action, attempt: read.attempt };
-  const { action, operation, registry, transfer } = read;
+  const staged = await stageRepaymentAttempt(db, { ...input, provenance: input.payments.rail.provenance, deploymentId: input.payments.deploymentId });
+  if ("already" in staged) return staged;
+  const { action, operation, transfer, attempt } = staged;
   const { payments } = input;
-  assertProvenanceAllowed(operation.environment, payments.rail.provenance);
-  await assertReservedOnChain(registry, action);
-
-  const attempt = immediateTransaction(db, () => {
-    const existing = liveAttempt(db, action);
-    if (existing !== undefined) return existing;
-    const id = newId();
-    const createdAt = input.now().toISOString();
-    db.prepare(
-      `INSERT INTO payment_attempts (id, operation_id, purpose, state, payer, payee, chain_id, token, amount_base_units,
-         intent_sha256, deployment_id, cart_mandate_id, payment_request_id, created_at, updated_at)
-       VALUES (?, ?, 'REPAYMENT', 'CREATED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      id,
-      operation.id,
-      transfer.payer,
-      transfer.payee,
-      transfer.chainId,
-      transfer.token,
-      transfer.amountBaseUnits,
-      action.actionSha256,
-      payments.deploymentId,
-      `cart-${id}`,
-      `pr-${id}`,
-      createdAt,
-      createdAt,
-    );
-    appendEvent(db, {
-      entityType: "payment_attempt",
-      entityId: id,
-      eventType: "PAYMENT_ATTEMPT_CREATED",
-      priorRevision: null,
-      newRevision: 0,
-      actor: "server",
-      payloadSha256: action.actionSha256,
-      createdAt,
-    });
-    const created = getPaymentAttempt(db, id);
-    if (created === undefined) throw new Error(`payment attempt ${id} was not stored`);
-    return created;
-  });
-  if (attempt.state !== "CREATED" && attempt.state !== "PREPARED") return readTransaction(db, () => ({ already: reread(db, action.id), attempt: liveAttempt(db, action) }));
   if (attempt.cartMandateId === null || attempt.paymentRequestId === null) throw new ActionIntegrityError(`repayment attempt ${attempt.id} has no gateway identifiers`);
 
   const prepared = await payments.rail.prepare({
@@ -172,6 +133,87 @@ async function stageRepayment(db: DatabaseSync, input: RequestRepaymentInput): P
   });
   if (!validation.ok) throw new RecoveryRefusedError("CART_REJECTED", `The repayment cart was rejected: ${validation.rejections.map((entry) => entry.message).join("; ")}.`);
   return { action, operation, transfer, attempt, cart: validation.cart };
+}
+
+interface StageAttemptInput {
+  caseId: string;
+  requestedBy: string;
+  registry: RegistryGateway | undefined;
+  provenance: Provenance;
+  deploymentId: string;
+  now: () => Date;
+  newId?: () => string;
+}
+
+/**
+ * Everything before a gateway order: the reservation must be current in the database and on the
+ * registry, and the attempt with its gateway identifiers is stored before any order exists.
+ */
+async function stageRepaymentAttempt(
+  db: DatabaseSync,
+  input: StageAttemptInput,
+): Promise<Omit<StagedRepayment, "cart"> | { already: RecoveryActionRecord; attempt: PaymentAttemptRecord | undefined }> {
+  const newId = input.newId ?? randomUUID;
+  const read = readTransaction(db, () => {
+    const action = getRecoveryActionForCase(db, input.caseId);
+    if (action === undefined) throw new RecoveryRefusedError("ACTION_NOT_FOUND", `Case ${input.caseId} has no recovery action.`);
+    if (action.action !== "REPAY") throw new RecoveryRefusedError("WRONG_ACTION_STATE", "Only a repayment is paid.");
+    const operation = requireOperation(db, action);
+    if (input.requestedBy.toLowerCase() !== operation.seller) throw new RecoveryRefusedError("ROLE_FORBIDDEN", "Only the seller pays a repayment from its own account.");
+    const registry = requireRegistry(input.registry, action.proposal);
+    if (REQUESTED.includes(action.state)) return { kind: "already" as const, action, attempt: liveAttempt(db, action) };
+    if (action.state !== "RESERVED") throw new RecoveryRefusedError("WRONG_ACTION_STATE", `The repayment is ${action.state}; it can be paid only once reserved.`);
+    if (action.authorizationMode !== "PER_CASE") {
+      throw new RecoveryRefusedError("NOT_EXECUTABLE", "A standing-policy repayment is paid by the seller's guarded signer, which is not connected.");
+    }
+    assertExecutable(db, action, input.now());
+    return { kind: "ready" as const, action, operation, registry, transfer: requireTransfer(action) };
+  });
+  if (read.kind === "already") return { already: read.action, attempt: read.attempt };
+  const { action, operation, registry, transfer } = read;
+  assertProvenanceAllowed(operation.environment, input.provenance);
+  await assertReservedOnChain(registry, action);
+
+  const attempt = immediateTransaction(db, () => {
+    const existing = liveAttempt(db, action);
+    if (existing !== undefined) return existing;
+    const id = newId();
+    const createdAt = input.now().toISOString();
+    db.prepare(
+      `INSERT INTO payment_attempts (id, operation_id, purpose, state, payer, payee, chain_id, token, amount_base_units,
+         intent_sha256, deployment_id, cart_mandate_id, payment_request_id, created_at, updated_at)
+       VALUES (?, ?, 'REPAYMENT', 'CREATED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      operation.id,
+      transfer.payer,
+      transfer.payee,
+      transfer.chainId,
+      transfer.token,
+      transfer.amountBaseUnits,
+      action.actionSha256,
+      input.deploymentId,
+      `cart-${id}`,
+      `pr-${id}`,
+      createdAt,
+      createdAt,
+    );
+    appendEvent(db, {
+      entityType: "payment_attempt",
+      entityId: id,
+      eventType: "PAYMENT_ATTEMPT_CREATED",
+      priorRevision: null,
+      newRevision: 0,
+      actor: "server",
+      payloadSha256: action.actionSha256,
+      createdAt,
+    });
+    const created = getPaymentAttempt(db, id);
+    if (created === undefined) throw new Error(`payment attempt ${id} was not stored`);
+    return created;
+  });
+  if (attempt.state !== "CREATED" && attempt.state !== "PREPARED") return readTransaction(db, () => ({ already: reread(db, action.id), attempt: liveAttempt(db, action) }));
+  return { action, operation, transfer, attempt };
 }
 
 /**
@@ -295,6 +337,111 @@ export async function submitRepaymentSignature(
   if (outcome.status === "ALREADY_REQUESTED") return alreadyRequested(db, action.id);
   const after = reread(db, action.id);
   return outcome.status === "SUBMITTED" ? { status: "SUBMITTED", action: after, attempt } : { status: "OUTCOME_UNKNOWN", action: after, attempt, reason: outcome.reason };
+}
+
+export type HspRepaymentSignatureRequest =
+  | { status: "SIGNATURE_REQUIRED"; action: RecoveryActionRecord; attempt: PaymentAttemptRecord; typedData: unknown; authorization: AuthorizationSummary; checks: OfferCheck[] }
+  | { status: "ALREADY_REQUESTED"; action: RecoveryActionRecord; attempt: PaymentAttemptRecord | undefined };
+
+interface HspRepaymentInput {
+  caseId: string;
+  requestedBy: string;
+  registry: RegistryGateway | undefined;
+  payments: HspRepaymentPayments;
+  now: () => Date;
+  newId?: () => string;
+}
+
+/**
+ * The first step of a repayment through HSP. The reservation is checked in the database and on
+ * the registry, HSP's order is created for the transfer the proposal fixed, and HSP's prepared
+ * authorization is checked against that transfer before the seller's wallet sees it. The action
+ * stays RESERVED: the permit is consumed only when the signature arrives, in the same transaction
+ * that moves the action to EXECUTION_REQUESTED.
+ */
+export async function requestHspRepaymentSignature(db: DatabaseSync, input: HspRepaymentInput): Promise<HspRepaymentSignatureRequest> {
+  const { rail } = input.payments;
+  const staged = await stageRepaymentAttempt(db, { ...input, provenance: rail.provenance, deploymentId: input.payments.deploymentId });
+  if ("already" in staged) return { status: "ALREADY_REQUESTED", action: staged.already, attempt: staged.attempt };
+  const { action, operation } = staged;
+  const notAfter = repaymentNotAfter(staged.attempt, action);
+  const attempt = await orderAttempt(db, {
+    attempt: staged.attempt,
+    rail,
+    order: { ...hspOrderInput(staged.attempt, { tokenDecimals: operation.tokenDecimals, priceUsd: operation.priceUsd, coin: rail.token.symbol, label: "SettleBack repayment" }), expiresAt: notAfter },
+    now: input.now,
+  });
+  const outcome = await offerAuthorization(db, { attemptId: attempt.id, rail, expectations: repaymentExpectations(action, input.payments.maxFeeBaseUnits, notAfter), now: input.now, ...(input.newId === undefined ? {} : { newId: input.newId }) });
+  if (outcome.status === "ALREADY_REQUESTED") return alreadyRequested(db, action.id);
+  if (outcome.status === "REFUSED") throw new RecoveryRefusedError("CART_REJECTED", `The repayment authorization was rejected: ${outcome.reasons.join("; ")}.`);
+  const { offer } = outcome;
+  return {
+    status: "SIGNATURE_REQUIRED",
+    action: reread(db, action.id),
+    attempt: outcome.attempt,
+    typedData: offer.walletTypedData,
+    authorization: { recipient: offer.authorization.to, payer: offer.authorization.from, amountBaseUnits: offer.authorization.value, quoteExpiresAt: offer.quoteExpiresAt, preparedBy: "hsp" },
+    checks: outcome.checks,
+  };
+}
+
+/**
+ * The seller's signature of the current authorization. The reservation is checked on the registry
+ * again; then the permit is consumed, the action and case move to EXECUTION_REQUESTED, and the offer
+ * is marked claimed in one transaction, before HSP receives the signature and submits it once.
+ */
+export async function submitHspRepaymentSignature(db: DatabaseSync, input: HspRepaymentInput & { signature: string }): Promise<RepaymentSubmission> {
+  const read = readTransaction(db, () => {
+    const action = getRecoveryActionForCase(db, input.caseId);
+    if (action === undefined) throw new RecoveryRefusedError("ACTION_NOT_FOUND", `Case ${input.caseId} has no recovery action.`);
+    if (action.action !== "REPAY") throw new RecoveryRefusedError("WRONG_ACTION_STATE", "Only a repayment is paid.");
+    const operation = requireOperation(db, action);
+    if (input.requestedBy.toLowerCase() !== operation.seller) throw new RecoveryRefusedError("ROLE_FORBIDDEN", "Only the seller pays a repayment from its own account.");
+    return { action, operation, registry: requireRegistry(input.registry, action.proposal), attempt: liveAttempt(db, action) };
+  });
+  const { action, operation, registry, attempt } = read;
+  if (REQUESTED.includes(action.state)) return { status: "ALREADY_REQUESTED", action, attempt };
+  if (attempt === undefined || attempt.state === "CREATED") throw new RecoveryRefusedError("WRONG_ACTION_STATE", "Request the repayment authorization before signing it.");
+  await assertReservedOnChain(registry, action);
+  const outcome = await submitAuthorization(db, {
+    attemptId: attempt.id,
+    rail: input.payments.rail,
+    requestedBy: input.requestedBy,
+    signature: input.signature,
+    priceUsd: operation.priceUsd,
+    expectations: repaymentExpectations(action, input.payments.maxFeeBaseUnits, repaymentNotAfter(attempt, action)),
+    now: input.now,
+    onClaim: claimReservation(action, operation, input.now),
+  });
+  const after = reread(db, action.id);
+  if (outcome.status === "ALREADY_REQUESTED") return { status: "ALREADY_REQUESTED", action: after, attempt: outcome.attempt };
+  return outcome.status === "SUBMITTED" ? { status: "SUBMITTED", action: after, attempt: outcome.attempt } : { status: "OUTCOME_UNKNOWN", action: after, attempt: outcome.attempt, reason: outcome.reason };
+}
+
+/** A repayment's authorization ends when its cart does, and never after the recovery deadline it pays under. */
+function repaymentNotAfter(attempt: PaymentAttemptRecord, action: RecoveryActionRecord): string {
+  const cart = Date.parse(hspCartExpiryOf(attempt));
+  const deadline = Date.parse(action.deadline);
+  return new Date(Math.min(cart, deadline)).toISOString();
+}
+
+function repaymentExpectations(action: RecoveryActionRecord, maxFeeBaseUnits: string, notAfter: string): (attempt: PaymentAttemptRecord) => OfferExpectations {
+  const transfer = requireTransfer(action);
+  return (attempt) => {
+    if (attempt.paymentRequestId === null) throw new ActionIntegrityError(`repayment attempt ${attempt.id} has no payment request`);
+    return {
+      paymentRequestId: attempt.paymentRequestId,
+      payer: transfer.payer,
+      payee: transfer.payee,
+      chainId: transfer.chainId,
+      token: transfer.token,
+      principalBaseUnits: transfer.amountBaseUnits,
+      maxFeeBaseUnits,
+      notAfter,
+      // The seller approved this one transfer; the registry, not a cap, accounts for its exposure.
+      policy: singleTransferPolicy(transfer.payee, transfer.amountBaseUnits, maxFeeBaseUnits),
+    };
+  };
 }
 
 /** A repayment whose permit is consumed but whose signature has not been submitted: offer the same mandate again. */

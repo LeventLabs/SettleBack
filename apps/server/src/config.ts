@@ -56,11 +56,31 @@ export interface ServerConfig {
   /** Undefined when no registry is configured; integrated repayment is then unavailable. */
   registry: RegistryConfig | undefined;
   auth: AuthConfig;
-  /** Local only: seeded fixture cases, in memory and reseeded on every start. */
+  /** The demo: seeded fixture cases (local, in memory), or jobs bought and paid through HSP on HSK Chain testnet. */
   demo: DemoConfig | undefined;
+  /** HSP Agentic Payment, for the HSP testnet demo; undefined otherwise. */
+  hsp: HspConfig | undefined;
 }
 
+export interface HspConfig {
+  /** HSP's MCP endpoint, or this team's relay to it from an allowlisted address. */
+  mcpUrl: string;
+  /** Sent as X-Settleback-Relay when the endpoint is the team's relay; never logged. */
+  relayToken: Secret | undefined;
+  /** The team's reporting name at HSP, used unchanged at order creation and in every query. */
+  merchantName: string;
+  /** An RPC endpoint of the payment chain, to check each payment HSP reports against the chain. */
+  paymentRpcUrl: string;
+}
+
+const HSP_QA_MCP_URL = "https://mcp-qa.hashkeymerchant.com/";
+
 export interface DemoConfig {
+  /**
+   * fixtures: the seeded, simulated cases plus jobs bought with simulated payments (local only).
+   * hsp-testnet: jobs bought through the workspace and paid through HSP on HSK Chain testnet.
+   */
+  kind: DemoKind;
   /** The fixture operations' buyer and seller: accounts the person running the demo can sign in with. */
   buyer: `0x${string}`;
   seller: `0x${string}`;
@@ -69,6 +89,7 @@ export interface DemoConfig {
 }
 
 export type DemoRegistry = "local" | "hsk-testnet";
+export type DemoKind = "fixtures" | "hsp-testnet";
 
 export interface AuthConfig {
   /** The only origin writes are accepted from, and the domain and URI wallets are asked to sign in to. */
@@ -90,13 +111,15 @@ export interface RegistryConfig {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const environment = parseEnvironment(env.SETTLEBACK_ENV ?? "local");
   const paymentWritesEnabled = parsePaymentWrites(env.SETTLEBACK_PAYMENT_WRITES ?? "disabled");
+  const demo = parseDemo(env, environment);
+  const hsp = parseHsp(env, demo);
 
-  // Live payment writes need chain, token, gateway, and finality settings that do not exist yet.
-  // Refusing here keeps a misconfigured deployment from looking ready.
-  if (paymentWritesEnabled && environment !== "local") {
+  // Outside the HSP testnet demo, live payment writes need chain, token, gateway, and finality
+  // settings that do not exist yet. Refusing here keeps a misconfigured deployment from looking ready.
+  if (paymentWritesEnabled && environment !== "local" && demo?.kind !== "hsp-testnet") {
     throw new Error(
       `SETTLEBACK_PAYMENT_WRITES=enabled is not supported for the "${environment}" environment: ` +
-        "live chain, token, gateway, and finality configuration is not implemented.",
+        "live chain, token, gateway, and finality configuration is not implemented outside SETTLEBACK_DEMO=hsp-testnet.",
     );
   }
 
@@ -104,7 +127,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     throw new Error(`SETTLEBACK_SIM_PROFILE applies only to the local environment, not "${environment}".`);
   }
 
-  const demo = parseDemo(env, environment);
+  // The HSP demo runs in the testnet environment, whose registry rules already require chain 133 over HTTPS.
+  const registry = parseRegistry(env, environment, env.SETTLEBACK_SIM_PROFILE === undefined ? "testnet" : parseNetworkProfile(env.SETTLEBACK_SIM_PROFILE), demo?.kind === "fixtures" ? demo.registry : undefined);
+  if (demo?.kind === "hsp-testnet" && registry === undefined) throw new Error("SETTLEBACK_DEMO=hsp-testnet needs its registry on HSK Chain testnet: set SETTLEBACK_REGISTRY_RPC_URL, SETTLEBACK_REGISTRY_CHAIN_ID, and SETTLEBACK_REGISTRY_ADDRESS.");
   return {
     environment,
     simulatedProfile: parseNetworkProfile(env.SETTLEBACK_SIM_PROFILE ?? "testnet"),
@@ -112,8 +137,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     port: parsePort(env.SETTLEBACK_PORT ?? "8787"),
     logLevel: parseLogLevel(env.SETTLEBACK_LOG_LEVEL ?? "info"),
     paymentWritesEnabled,
-    // The demo's data is disposable: it lives in memory and is reseeded on every start.
-    databasePath: demo === undefined ? (env.SETTLEBACK_DB_PATH ?? `${DEFAULT_DATA_DIR}settleback-${environment}.db`) : ":memory:",
+    // The fixture demo's data is disposable: it lives in memory and is reseeded on every start. The
+    // HSP demo pays for real on testnet, so its records are kept to recover any payment after a restart.
+    databasePath: demo?.kind === "fixtures" ? ":memory:" : (env.SETTLEBACK_DB_PATH ?? `${DEFAULT_DATA_DIR}settleback-${environment}.db`),
     assessment: {
       model: parseMember("SETTLEBACK_ASSESSMENT_MODEL", env.SETTLEBACK_ASSESSMENT_MODEL ?? "claude-opus-5-5", ASSESSMENT_MODELS),
       effort: parseMember("SETTLEBACK_ASSESSMENT_EFFORT", env.SETTLEBACK_ASSESSMENT_EFFORT ?? "medium", ASSESSMENT_EFFORTS),
@@ -121,9 +147,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       timeoutMs: parseBoundedInteger("SETTLEBACK_ASSESSMENT_TIMEOUT_MS", env.SETTLEBACK_ASSESSMENT_TIMEOUT_MS ?? "45000", 5000, 120000),
       apiKey: parseApiKey(env.ANTHROPIC_API_KEY),
     },
-    registry: parseRegistry(env, environment, env.SETTLEBACK_SIM_PROFILE === undefined ? "testnet" : parseNetworkProfile(env.SETTLEBACK_SIM_PROFILE), demo?.registry),
-    auth: { webOrigin: parseWebOrigin(env.SETTLEBACK_WEB_ORIGIN, environment), operators: parseOperators(env.SETTLEBACK_OPERATORS ?? "") },
+    registry,
+    auth: { webOrigin: parseWebOrigin(env.SETTLEBACK_WEB_ORIGIN, environment, demo?.kind === "hsp-testnet"), operators: parseOperators(env.SETTLEBACK_OPERATORS ?? "") },
     demo,
+    hsp,
   };
 }
 
@@ -138,15 +165,54 @@ function parseDemo(env: NodeJS.ProcessEnv, environment: Environment): DemoConfig
     }
     return undefined;
   }
-  if (mode !== "fixtures") throw new Error(`SETTLEBACK_DEMO must be "fixtures" or unset, got "${mode}".`);
-  if (environment !== "local") throw new Error(`SETTLEBACK_DEMO applies only to the local environment, not "${environment}".`);
-  if ((env.SETTLEBACK_DB_PATH ?? "") !== "") throw new Error("The demo keeps its data in memory; unset SETTLEBACK_DB_PATH.");
+  if (mode !== "fixtures" && mode !== "hsp-testnet") throw new Error(`SETTLEBACK_DEMO must be "fixtures", "hsp-testnet", or unset, got "${mode}".`);
+  if (mode === "fixtures" && environment !== "local") throw new Error(`SETTLEBACK_DEMO=fixtures applies only to the local environment, not "${environment}".`);
+  if (mode === "hsp-testnet" && environment !== "testnet") throw new Error(`SETTLEBACK_DEMO=hsp-testnet runs in the testnet environment, not "${environment}".`);
+  if (mode === "fixtures" && (env.SETTLEBACK_DB_PATH ?? "") !== "") throw new Error("The demo keeps its data in memory; unset SETTLEBACK_DB_PATH.");
   for (const [name, value] of [["SETTLEBACK_DEMO_BUYER", buyer], ["SETTLEBACK_DEMO_SELLER", seller]] as const) {
     if (!/^0x[0-9a-fA-F]{40}$/.test(value)) throw new Error(`${name} must be the 20-byte hex address of an account you can sign in with, got "${value}".`);
   }
   if (buyer.toLowerCase() === seller.toLowerCase()) throw new Error("SETTLEBACK_DEMO_BUYER and SETTLEBACK_DEMO_SELLER must be different accounts.");
   if (registry !== "" && registry !== "local" && registry !== "hsk-testnet") throw new Error(`SETTLEBACK_DEMO_REGISTRY must be "local" or "hsk-testnet", got "${registry}".`);
-  return { buyer: buyer.toLowerCase() as `0x${string}`, seller: seller.toLowerCase() as `0x${string}`, registry: registry === "hsk-testnet" ? "hsk-testnet" : "local" };
+  if (mode === "hsp-testnet" && registry !== "") throw new Error("SETTLEBACK_DEMO_REGISTRY applies only with SETTLEBACK_DEMO=fixtures; the HSP demo always uses its registry on HSK Chain testnet.");
+  return {
+    kind: mode,
+    buyer: buyer.toLowerCase() as `0x${string}`,
+    seller: seller.toLowerCase() as `0x${string}`,
+    registry: mode === "hsp-testnet" || registry === "hsk-testnet" ? "hsk-testnet" : "local",
+  };
+}
+
+const HSP_VARIABLES = ["SETTLEBACK_HSP_MCP_URL", "SETTLEBACK_HSP_RELAY_TOKEN", "SETTLEBACK_HSP_MERCHANT_NAME", "SETTLEBACK_PAYMENT_RPC_URL"] as const;
+
+function parseHsp(env: NodeJS.ProcessEnv, demo: DemoConfig | undefined): HspConfig | undefined {
+  if (demo?.kind !== "hsp-testnet") {
+    const given = HSP_VARIABLES.filter((name) => (env[name] ?? "") !== "");
+    if (given.length > 0) throw new Error(`${given.join(", ")} apply only with SETTLEBACK_DEMO=hsp-testnet.`);
+    return undefined;
+  }
+  const merchantName = env.SETTLEBACK_HSP_MERCHANT_NAME ?? "";
+  // HSP aggregates team payments by this exact name, so it must be given explicitly.
+  if (!/^[\x20-\x7e]{1,64}$/.test(merchantName) || merchantName.trim() !== merchantName) {
+    throw new Error("SETTLEBACK_HSP_MERCHANT_NAME must be the team's reporting name at HSP: 1-64 printable characters without surrounding spaces.");
+  }
+  const mcpUrl = httpsUrl("SETTLEBACK_HSP_MCP_URL", env.SETTLEBACK_HSP_MCP_URL ?? HSP_QA_MCP_URL);
+  const paymentRpcUrl = httpsUrl("SETTLEBACK_PAYMENT_RPC_URL", env.SETTLEBACK_PAYMENT_RPC_URL ?? "");
+  const token = env.SETTLEBACK_HSP_RELAY_TOKEN ?? "";
+  // Never echo the value.
+  if (token !== "" && !/^[0-9a-f]{32,128}$/.test(token)) throw new Error("SETTLEBACK_HSP_RELAY_TOKEN must be 32 to 128 lowercase hex digits.");
+  return { mcpUrl, relayToken: token === "" ? undefined : new Secret(token), merchantName, paymentRpcUrl };
+}
+
+function httpsUrl(name: string, value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be an HTTPS URL, got "${value}".`);
+  }
+  if (url.protocol !== "https:") throw new Error(`${name} must use HTTPS, got "${value}".`);
+  return url.toString();
 }
 
 const LOCAL_WEB_ORIGIN = "http://localhost:5173";
@@ -156,9 +222,10 @@ const LOOPBACK_HOSTS = ["localhost", "127.0.0.1"];
  * A bare origin (scheme, host, optional port). A live environment must name its HTTPS origin; plain
  * HTTP is accepted only for a loopback host in the local environment.
  */
-function parseWebOrigin(value: string | undefined, environment: Environment): string {
+function parseWebOrigin(value: string | undefined, environment: Environment, loopbackDemo: boolean): string {
+  const loopbackAllowed = environment === "local" || loopbackDemo;
   if (value === undefined || value === "") {
-    if (environment === "local") return LOCAL_WEB_ORIGIN;
+    if (loopbackAllowed) return LOCAL_WEB_ORIGIN;
     throw new Error(`SETTLEBACK_WEB_ORIGIN is required for the "${environment}" environment.`);
   }
   let url: URL;
@@ -169,8 +236,8 @@ function parseWebOrigin(value: string | undefined, environment: Environment): st
   }
   if (url.origin !== value) throw new Error(`SETTLEBACK_WEB_ORIGIN must be a bare origin such as https://settleback.xyz, got "${value}".`);
   if (url.protocol === "https:") return value;
-  if (url.protocol === "http:" && environment === "local" && LOOPBACK_HOSTS.includes(url.hostname)) return value;
-  throw new Error(`SETTLEBACK_WEB_ORIGIN must use HTTPS${environment === "local" ? " or a loopback HTTP origin" : ""}, got "${value}".`);
+  if (url.protocol === "http:" && loopbackAllowed && LOOPBACK_HOSTS.includes(url.hostname)) return value;
+  throw new Error(`SETTLEBACK_WEB_ORIGIN must use HTTPS${loopbackAllowed ? " or a loopback HTTP origin" : ""}, got "${value}".`);
 }
 
 function parseOperators(value: string): `0x${string}`[] {

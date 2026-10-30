@@ -8,6 +8,7 @@ import { loadSourceBytes, loadSources } from "@settleback/fixtures";
 import { buildApp } from "../../src/app.ts";
 import { loadConfig } from "../../src/config.ts";
 import { DemoPurchases } from "../../src/demo/purchases.ts";
+import { simulatedPurchasePayments } from "../../src/payments/purchase-payments.ts";
 import { TOKEN, memoryDatabase } from "../db/helpers.ts";
 import { TERMS, registerFixturePolicies } from "../recovery/helpers.ts";
 
@@ -38,17 +39,19 @@ function server(paymentWrites: "enabled" | "disabled" = "enabled"): FastifyInsta
   const sellerAddress = seller.address.toLowerCase() as Address;
   const purchases = new DemoPurchases(db, {
     seller: sellerAddress,
-    agent: {
-      rail: sim.rail,
-      merchant: { merchantName: "SettleBack Demo Seller", publicKey: sim.merchantPublicKey },
-      policy: { payeeAllowlist: [sellerAddress], perPaymentCapBaseUnits: "5000000", dailyCapBaseUnits: "20000000", maxFeeBaseUnits: "100000", usdRate: "1" },
-      deploymentId: "local-demo",
-      coin: "USDC",
-      label: "Structured extraction job",
-    },
+    payments: simulatedPurchasePayments(
+      {
+        rail: sim.rail,
+        merchant: { merchantName: "SettleBack Demo Seller", publicKey: sim.merchantPublicKey },
+        policy: { payeeAllowlist: [sellerAddress], perPaymentCapBaseUnits: "5000000", dailyCapBaseUnits: "20000000", maxFeeBaseUnits: "100000", usdRate: "1" },
+        deploymentId: "local-demo",
+        coin: "USDC",
+        label: "Structured extraction job",
+      },
+      { chainId: 133, token: TOKEN as Address, tokenDecimals: 6 },
+    ),
     source: { id: source!.id, text: loadSourceBytes(source!).toString("utf8"), sha256: source!.sourceSha256 },
     policy: { id: policy!.id, sha256: policy!.sha256 },
-    token: TOKEN as Address,
     now: () => sim.clock.now(),
   });
   const app = buildApp(loadConfig({ SETTLEBACK_LOG_LEVEL: "silent", SETTLEBACK_PAYMENT_WRITES: paymentWrites }), { db, terms: TERMS, purchases });

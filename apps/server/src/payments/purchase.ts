@@ -133,7 +133,7 @@ function checkQuote(db: DatabaseSync, operation: OperationRecord, attempt: Payme
  * The buyer's gross spend today (amount plus the maximum fee) on other original payments that are
  * not closed, including uncertain ones: an unknown payment still counts against the cap.
  */
-function spentToday(db: DatabaseSync, buyer: string, exceptAttemptId: string, maxFeeBaseUnits: string, now: Date): string {
+export function spentToday(db: DatabaseSync, buyer: string, exceptAttemptId: string, maxFeeBaseUnits: string, now: Date): string {
   const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
   const rows = db
     .prepare(
@@ -153,7 +153,7 @@ function awaitingSignature(db: DatabaseSync, operation: OperationRecord, agent: 
   return { status: "SIGNATURE_REQUIRED", attempt, payload };
 }
 
-function requireBuyer(db: DatabaseSync, operationId: string, buyer: string): OperationRecord {
+export function requireBuyer(db: DatabaseSync, operationId: string, buyer: string): OperationRecord {
   const operation = readTransaction(db, () => getOperation(db, operationId));
   if (operation === undefined) throw new OperationNotFoundError(operationId);
   if (operation.buyer !== buyer.toLowerCase()) throw new ExecutionRefusedError("ROLE_FORBIDDEN", "Only the operation's buyer pays for it.");

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { Address, PolicyTerms } from "@settleback/domain";
+import type { Address, Environment, PolicyTerms } from "@settleback/domain";
 import { composeCaseEvidence, type ComposedCase } from "@settleback/demo-service";
 import { loadCases, loadPolicyTerms, loadPolicyText, loadSourceBytes, loadSources } from "@settleback/fixtures";
 import { loadCaseEvidence, openCase } from "../db/cases.ts";
@@ -11,7 +11,8 @@ import type { ResultLookup } from "../recovery/retrieval.ts";
 /**
  * Sets up fixture cases for the local demo, the tests, and the assessment evaluation: the demo
  * service produces the evidence, the server records it, and a lookup reads the same simulated
- * services. Everything here is synthetic and is accepted only in the local environment.
+ * services. Everything here is synthetic. The demo and the evaluation record it in the local
+ * environment; only tests of a live payment rail record it in a live one.
  */
 export const NOW = "2026-10-30T10:00:00.000Z";
 export const BUYER = "0x00000000000000000000000000000000000000b1";
@@ -39,7 +40,7 @@ export interface FixtureParties {
 }
 
 /** Runs the components for a fixture, records their evidence, opens the case, and connects a lookup to the same services. */
-export async function setupFixtureCase(db: DatabaseSync, fixtureId: string, parties: FixtureParties = { buyer: BUYER, seller: SELLER }): Promise<FixtureCaseSetup> {
+export async function setupFixtureCase(db: DatabaseSync, fixtureId: string, parties: FixtureParties = { buyer: BUYER, seller: SELLER }, environment: Environment = "local"): Promise<FixtureCaseSetup> {
   const fixture = loadCases().find((entry) => entry.id === fixtureId);
   const source = loadSources()[0];
   if (fixture === undefined || source === undefined) throw new Error(`fixture ${fixtureId} missing`);
@@ -48,7 +49,7 @@ export async function setupFixtureCase(db: DatabaseSync, fixtureId: string, part
   const { operation } = createOperation(db, {
     actor: parties.buyer,
     idempotencyKey: `key-${fixture.id}`,
-    environment: "local",
+    environment,
     now: NOW,
     intent: {
       buyer: parties.buyer,

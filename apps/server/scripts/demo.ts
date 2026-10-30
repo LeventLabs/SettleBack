@@ -1,7 +1,9 @@
-// Starts the demonstration with the server seeded with the fixture cases. By default the
+// Starts the demonstration. By default the server is seeded with the fixture cases and the
 // RecoveryRegistry is deployed to a disposable anvil chain (npm run demo). With --hsk-testnet the
 // server uses the demo registry already deployed on HSK Chain testnet, with keys kept outside the
-// repository (npm run demo:testnet); payments stay simulated either way.
+// repository (npm run demo:testnet); payments stay simulated. With --hsp, jobs bought in the
+// workspace and their repayments are paid through HSP Agentic Payment on HSK Chain testnet
+// (npm run demo:hsp), with the same registry and keys and no seeded cases.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:net";
@@ -38,6 +40,9 @@ const FORWARDED = [
   "SETTLEBACK_LOG_LEVEL",
   "SETTLEBACK_PORT",
 ];
+// HSP Agentic Payment: the endpoint (HSP's, or the team's relay from an allowlisted address) and the team name.
+const HSP_FORWARDED = ["SETTLEBACK_HSP_MCP_URL", "SETTLEBACK_HSP_MERCHANT_NAME", "SETTLEBACK_DB_PATH"];
+const RELAY_TOKEN_FILE = (process.env.SETTLEBACK_HSP_RELAY_TOKEN_FILE ?? `${homedir()}/.config/settleback/hsp-relay.token`).replace(/^~(?=\/)/, homedir());
 
 const children: ChildProcess[] = [];
 const stop = (code: number): never => {
@@ -48,13 +53,15 @@ process.once("SIGINT", () => stop(0));
 process.once("SIGTERM", () => stop(0));
 
 const args = process.argv.slice(2);
-for (const arg of args) if (arg !== "--hsk-testnet") fail(`Unknown option "${arg}". The only option is --hsk-testnet.`);
-const onHskTestnet = args.includes("--hsk-testnet");
+for (const arg of args) if (arg !== "--hsk-testnet" && arg !== "--hsp") fail(`Unknown option "${arg}". The options are --hsk-testnet and --hsp.`);
+const throughHsp = args.includes("--hsp");
+const onHskTestnet = throughHsp || args.includes("--hsk-testnet");
 const address = (key: Hex) => privateKeyToAccount(key).address;
 const network = onHskTestnet ? await hskTestnet() : await localChain();
 const { rpcUrl, chainId, registry, verifier, buyer, seller, operator } = network;
 
-const forwarded = Object.fromEntries(FORWARDED.flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name] as string]])));
+const forwarded = Object.fromEntries([...FORWARDED, ...(throughHsp ? HSP_FORWARDED : [])].flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name] as string]])));
+const hspSettings = throughHsp ? hspEnvironment() : {};
 const server = spawn(process.execPath, ["src/main.ts"], {
   cwd: SERVER,
   stdio: "inherit",
@@ -62,13 +69,14 @@ const server = spawn(process.execPath, ["src/main.ts"], {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     ...forwarded,
-    SETTLEBACK_ENV: "local",
-    SETTLEBACK_DEMO: "fixtures",
+    ...hspSettings,
+    SETTLEBACK_ENV: throughHsp ? "testnet" : "local",
+    SETTLEBACK_DEMO: throughHsp ? "hsp-testnet" : "fixtures",
     SETTLEBACK_DEMO_BUYER: address(buyer),
     SETTLEBACK_DEMO_SELLER: address(seller),
     SETTLEBACK_OPERATORS: address(operator),
     SETTLEBACK_PAYMENT_WRITES: "enabled",
-    ...(onHskTestnet ? { SETTLEBACK_DEMO_REGISTRY: "hsk-testnet" } : {}),
+    ...(onHskTestnet && !throughHsp ? { SETTLEBACK_DEMO_REGISTRY: "hsk-testnet" } : {}),
     SETTLEBACK_REGISTRY_RPC_URL: rpcUrl,
     SETTLEBACK_REGISTRY_CHAIN_ID: String(chainId),
     SETTLEBACK_REGISTRY_ADDRESS: registry,
@@ -80,7 +88,19 @@ server.once("exit", (code) => stop(code ?? 1));
 
 const assessments = forwarded.ANTHROPIC_API_KEY === undefined ? "off (no ANTHROPIC_API_KEY in .env); requests are recorded as failed" : "Claude, from ANTHROPIC_API_KEY in .env";
 console.log(
-  (onHskTestnet
+  (throughHsp
+    ? [
+        "",
+        "SettleBack on HSK Chain testnet with HSP Agentic Payment. Purchases and repayments are real testnet payments through HSP;",
+        "  the job service is the demo's, with the faults you choose; the RecoveryRegistry is live. Records are kept in data/.",
+        `  HSP endpoint: ${hspSettings.SETTLEBACK_HSP_MCP_URL ?? "HSP QA"}${hspSettings.SETTLEBACK_HSP_RELAY_TOKEN === undefined ? "" : " (relay, token from file)"}; team name: ${hspSettings.SETTLEBACK_HSP_MERCHANT_NAME}`,
+        `  Wallet network: HSK Chain testnet, RPC ${rpcUrl}, chain ID ${chainId}`,
+        `  RecoveryRegistry: ${registry}  ${HSK_TESTNET.explorer}/address/${registry}`,
+        `  Accounts (import the key files into a wallet used only for this demo; keys in ${HSK_TESTNET.keys}):`,
+        ...network.balances.map((line) => `    ${line}`),
+        "  The buyer and the seller each need HSP's test USDC; npm run hsp:check shows the token and both balances.",
+      ]
+    : onHskTestnet
     ? [
         "",
         "SettleBack demo on HSK Chain testnet. Payments, the gateway, and the job service are simulated; the RecoveryRegistry is live.",
@@ -168,6 +188,20 @@ async function hskTestnet(): Promise<DemoNetwork> {
     balances.push(`${role.padEnd(9)} ${holder}  ${formatEther(balance)} HSK${needsGas ? "" : " (needs none)"}`);
   }
   return { rpcUrl: HSK_TESTNET.rpcUrl, chainId, registry: HSK_TESTNET.registry, ...keys, balances };
+}
+
+/** The HSP settings the server needs; the relay token is read from a file only the current user can read, never echoed. */
+function hspEnvironment(): Record<string, string> {
+  const settings: Record<string, string> = {
+    SETTLEBACK_HSP_MERCHANT_NAME: process.env.SETTLEBACK_HSP_MERCHANT_NAME ?? "SettleBack",
+    SETTLEBACK_PAYMENT_RPC_URL: HSK_TESTNET.rpcUrl,
+  };
+  if (process.env.SETTLEBACK_HSP_MCP_URL !== undefined) settings.SETTLEBACK_HSP_MCP_URL = process.env.SETTLEBACK_HSP_MCP_URL;
+  if (process.env.SETTLEBACK_HSP_MCP_URL !== undefined && existsSync(RELAY_TOKEN_FILE)) {
+    if ((statSync(RELAY_TOKEN_FILE).mode & 0o077) !== 0) fail(`${RELAY_TOKEN_FILE} is readable by other users; restrict it with chmod 600.`);
+    settings.SETTLEBACK_HSP_RELAY_TOKEN = readFileSync(RELAY_TOKEN_FILE, "utf8").trim();
+  }
+  return settings;
 }
 
 function readKey(file: string): Hex {

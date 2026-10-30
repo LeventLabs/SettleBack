@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { CartValidation, PaymentRail } from "@settleback/adapters";
+import { decimalToBaseUnits, type PaymentCheck } from "@settleback/adapters";
 import type { Address, EvidenceMediaType, EvidenceSource } from "@settleback/domain";
 import { startServiceRun, type ServiceEvidence, type ServiceFaults, type ServiceRun } from "@settleback/demo-service";
 import { openCase, readCaseForOperation } from "../db/cases.ts";
@@ -8,14 +8,17 @@ import { ingestEvidence } from "../db/evidence.ts";
 import { createOperation } from "../db/operations.ts";
 import type { PaymentAttemptRecord } from "../db/payments.ts";
 import { ExecutionRefusedError } from "../payments/execution.ts";
-import { liveOriginalAttempt, quoteForBuyer, type BuyerPaymentAgent } from "../payments/purchase.ts";
-import type { Quote } from "../payments/quote.ts";
+import { liveOriginalAttempt } from "../payments/purchase.ts";
+import type { AuthorizationSummary, PurchasePayments, PurchaseSignatureRequest, PurchaseSubmission, QuoteSummary } from "../payments/purchase-payments.ts";
 import type { ResultLookup } from "../recovery/retrieval.ts";
 
 /** How long the buyer's connection waits for the job's response. */
 export const RESPONSE_DEADLINE_MS = 12_000;
 /** How long after the job starts its records are still collected into the case. */
 const COLLECTION_WINDOW_MS = 60_000;
+/** Every demo job costs one dollar. */
+const PRICE_USD = "1.00";
+const GATEWAY_QUERY_INTERVAL_MS = 15_000;
 
 /**
  * The faults the demo injects into a purchased job, chosen before the payment is authorized. They
@@ -68,8 +71,11 @@ export interface PurchaseRecord {
   scenario: PurchaseScenario;
   requestId: string;
   createdAt: string;
-  quote: Quote | undefined;
-  validation: CartValidation | undefined;
+  quote: QuoteSummary | undefined;
+  /** The Payment Agent's latest checks: of the quote, then of the authorization the wallet signs. */
+  checks: PaymentCheck[];
+  /** What the buyer's wallet was last asked to authorize. */
+  authorization: AuthorizationSummary | undefined;
   /** When the buyer's signature reached the gateway; the attempt itself moves only when reconciliation sees it. */
   signatureSubmittedAt: string | undefined;
   run: ServiceRun | undefined;
@@ -78,6 +84,8 @@ export interface PurchaseRecord {
   caseId: string | undefined;
   events: PurchaseEvent[];
   done: boolean;
+  /** When the gateway's record was last read into the case. */
+  gatewayAskedAt?: number;
 }
 
 export class PurchaseScenarioConflictError extends StoreError {
@@ -88,18 +96,17 @@ export class PurchaseScenarioConflictError extends StoreError {
 
 export interface DemoPurchaseOptions {
   seller: Address;
-  agent: BuyerPaymentAgent;
+  payments: PurchasePayments;
   /** The source document every purchased job extracts from. */
   source: { id: string; text: string; sha256: string };
   policy: { id: string; sha256: string };
-  token: Address;
   now: () => Date;
 }
 
 /**
- * Purchases made through the workspace in the local demo: a new operation per purchase, paid by
- * the buyer's wallet through the gateway simulator, then run against the demo service with the
- * chosen faults. Records live in memory, as the rest of the demo does.
+ * Purchases made through the workspace in the demo: a new operation per purchase, paid by the
+ * buyer's wallet (through the gateway simulator, or through HSP on HSK Chain testnet), then run
+ * against the demo service with the chosen faults. Purchase progress lives in memory.
  */
 export class DemoPurchases {
   private readonly db: DatabaseSync;
@@ -112,8 +119,8 @@ export class DemoPurchases {
     this.options = options;
   }
 
-  get agent(): BuyerPaymentAgent {
-    return this.options.agent;
+  get payments(): PurchasePayments {
+    return this.options.payments;
   }
 
   /**
@@ -123,10 +130,11 @@ export class DemoPurchases {
   async create(input: { buyer: string; scenario: PurchaseScenario; idempotencyKey: string }): Promise<PurchaseRecord> {
     if (input.buyer.toLowerCase() === this.options.seller) throw new ExecutionRefusedError("ROLE_FORBIDDEN", "The seller does not buy its own job; sign in with the buyer's wallet.");
     const now = this.options.now();
+    const network = this.options.payments.network;
     const { operation } = createOperation(this.db, {
       actor: input.buyer,
       idempotencyKey: input.idempotencyKey,
-      environment: "local",
+      environment: network.environment,
       now: now.toISOString(),
       intent: {
         buyer: input.buyer,
@@ -135,11 +143,11 @@ export class DemoPurchases {
         requestSha256: this.options.source.sha256,
         policyId: this.options.policy.id,
         policySha256: this.options.policy.sha256,
-        chainId: 133,
-        token: this.options.token,
-        tokenDecimals: 6,
-        priceUsd: "1.00",
-        amountBaseUnits: "1000000",
+        chainId: network.chainId,
+        token: network.token,
+        tokenDecimals: network.tokenDecimals,
+        priceUsd: PRICE_USD,
+        amountBaseUnits: decimalToBaseUnits(PRICE_USD, network.tokenDecimals),
       },
     });
     let record = this.purchases.get(operation.id);
@@ -152,7 +160,8 @@ export class DemoPurchases {
         requestId: `req-${operation.id.slice(0, 8)}`,
         createdAt: operation.createdAt,
         quote: undefined,
-        validation: undefined,
+        checks: [],
+        authorization: undefined,
         signatureSubmittedAt: undefined,
         run: undefined,
         jobStartedAt: undefined,
@@ -165,9 +174,9 @@ export class DemoPurchases {
     }
     const attempt = liveOriginalAttempt(this.db, operation.id);
     if (attempt === undefined || attempt.state === "CREATED" || attempt.state === "PREPARED") {
-      const quoted = await quoteForBuyer(this.db, { operationId: operation.id, buyer: input.buyer, agent: this.options.agent, now: this.options.now });
-      record.quote = quoted.quote;
-      record.validation = quoted.validation;
+      const quoted = await this.options.payments.quote(this.db, { operationId: operation.id, buyer: input.buyer, now: this.options.now });
+      record.quote = quoted.summary;
+      record.checks = quoted.checks;
     }
     return record;
   }
@@ -176,10 +185,25 @@ export class DemoPurchases {
     return this.purchases.get(operationId);
   }
 
-  /** Notes that the buyer's signature was handed to the gateway, whatever the gateway answered. */
-  signatureSubmitted(operationId: string): void {
-    const record = this.purchases.get(operationId);
-    if (record !== undefined && record.signatureSubmittedAt === undefined) record.signatureSubmittedAt = this.options.now().toISOString();
+  /**
+   * The wallet's first step: the typed data to sign once the Payment Agent's checks pass. A
+   * refusal keeps the checks on the record, so the buyer sees which one blocked the payment.
+   */
+  async requestSignature(record: PurchaseRecord, buyer: string): Promise<PurchaseSignatureRequest> {
+    const outcome = await this.options.payments.requestSignature(this.db, { operationId: record.operationId, buyer, now: this.options.now });
+    if (outcome.status === "REFUSED") record.checks = outcome.checks;
+    if (outcome.status === "SIGNATURE_REQUIRED") {
+      record.authorization = outcome.authorization;
+      if (outcome.checks !== null) record.checks = outcome.checks;
+    }
+    return outcome;
+  }
+
+  /** The wallet's second step. The signature is noted as handed to the gateway, whatever the gateway answered. */
+  async submitSignature(record: PurchaseRecord, buyer: string, signature: string): Promise<PurchaseSubmission> {
+    const outcome = await this.options.payments.submitSignature(this.db, { operationId: record.operationId, buyer, signature, now: this.options.now });
+    if (record.signatureSubmittedAt === undefined) record.signatureSubmittedAt = this.options.now().toISOString();
+    return outcome;
   }
 
   attempt(operationId: string): PaymentAttemptRecord | undefined {
@@ -266,8 +290,10 @@ export class DemoPurchases {
   private async collect(record: PurchaseRecord, run: ServiceRun, now: Date): Promise<boolean> {
     const submissions = run.evidence().map((item) => fromService(item, record.requestId, run.now().toISOString()));
     const attempt = liveOriginalAttempt(this.db, record.operationId);
-    if (attempt?.paymentRequestId != null) {
-      const observed = await this.options.agent.rail.observe(attempt.paymentRequestId).catch(() => undefined);
+    // The gateway is asked at most once per interval, as HSP asks of status queries.
+    if (attempt?.paymentRequestId != null && (record.gatewayAskedAt === undefined || now.getTime() - record.gatewayAskedAt >= GATEWAY_QUERY_INTERVAL_MS)) {
+      record.gatewayAskedAt = now.getTime();
+      const observed = await this.options.payments.observer.observe(attempt.paymentRequestId).catch(() => undefined);
       if (observed !== undefined) {
         submissions.unshift({
           submittedBy: "reconciler",

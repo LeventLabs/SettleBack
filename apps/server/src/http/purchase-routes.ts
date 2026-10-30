@@ -1,12 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { FastifyInstance } from "fastify";
-import { walletTypedData } from "@settleback/adapters";
 import { readTransaction } from "../db/database.ts";
 import { StoreError } from "../db/errors.ts";
 import { getOperation } from "../db/operations.ts";
 import type { PaymentAttemptRecord } from "../db/payments.ts";
 import { PURCHASE_SCENARIOS, RESPONSE_DEADLINE_MS, isPurchaseScenario, type DemoPurchases, type PurchaseRecord } from "../demo/purchases.ts";
-import { requestPaymentSignature, submitPaymentSignature } from "../payments/purchase.ts";
+import { ExecutionRefusedError } from "../payments/execution.ts";
 import type { RequestGuard } from "./guard.ts";
 import { attemptView } from "./views.ts";
 
@@ -25,10 +24,9 @@ const ID_PARAMS = {
 } as const;
 
 /**
- * Buying a job in the local demo: the signed-in account becomes the operation's buyer, its
- * Payment Agent checks the receiving agent's quote, and the buyer's wallet authorizes the payment.
- * Only the buyer can read or act on its purchase; anyone else gets the same NOT_FOUND as an
- * unknown ID.
+ * Buying a job in the demo: the signed-in account becomes the operation's buyer, its Payment
+ * Agent checks the quote and then the authorization, and the buyer's wallet signs it. Only the
+ * buyer can read or act on its purchase; anyone else gets the same NOT_FOUND as an unknown ID.
  */
 export function registerPurchaseRoutes(app: FastifyInstance, deps: PurchaseRouteDependencies): void {
   const { db, guard, purchases } = deps;
@@ -67,10 +65,13 @@ export function registerPurchaseRoutes(app: FastifyInstance, deps: PurchaseRoute
   app.post("/api/purchases/:id/authorize", { schema: { params: ID_PARAMS } }, async (request) => {
     const session = guard.session(request, { wallet: true });
     const record = ownPurchase(purchases, session.address, (request.params as { id: string }).id);
-    const outcome = await requestPaymentSignature(db, { operationId: record.operationId, buyer: session.address, agent: purchases.agent, now });
+    const outcome = await purchases.requestSignature(record, session.address);
+    if (outcome.status === "REFUSED") {
+      throw new ExecutionRefusedError("CART_REJECTED", `The authorization does not pass the Payment Agent's checks: ${outcome.reasons.join("; ")}.`);
+    }
     return {
       status: outcome.status,
-      ...(outcome.status === "SIGNATURE_REQUIRED" ? { typedData: walletTypedData(outcome.payload), mandate: outcome.payload.mandate } : {}),
+      ...(outcome.status === "SIGNATURE_REQUIRED" ? { typedData: outcome.typedData, authorization: outcome.authorization } : {}),
       purchase: purchaseView(db, purchases, record),
     };
   });
@@ -87,8 +88,7 @@ export function registerPurchaseRoutes(app: FastifyInstance, deps: PurchaseRoute
       const session = guard.session(request, { wallet: true });
       const record = ownPurchase(purchases, session.address, (request.params as { id: string }).id);
       const { signature } = request.body as { signature: string };
-      const outcome = await submitPaymentSignature(db, { operationId: record.operationId, buyer: session.address, signature, agent: purchases.agent });
-      purchases.signatureSubmitted(record.operationId);
+      const outcome = await purchases.submitSignature(record, session.address, signature);
       return {
         status: outcome.status,
         ...(outcome.status === "OUTCOME_UNKNOWN" ? { reason: outcome.reason } : {}),
@@ -118,7 +118,8 @@ function purchaseView(db: DatabaseSync, purchases: DemoPurchases, record: Purcha
   const operation = readTransaction(db, () => getOperation(db, record.operationId));
   if (operation === undefined) throw new Error(`purchase ${record.operationId} has no operation`);
   const attempt = purchases.attempt(record.operationId);
-  const { quote, validation } = record;
+  const { quote } = record;
+  const { limits, network, observer, kind } = purchases.payments;
   const started = record.jobStartedAt === undefined ? undefined : Date.parse(record.jobStartedAt);
   return {
     operationId: record.operationId,
@@ -138,18 +139,15 @@ function purchaseView(db: DatabaseSync, purchases: DemoPurchases, record: Purcha
       quote === undefined
         ? null
         : {
-            merchantName: quote.cartMandate.contents.merchant_name,
-            cartMandateId: quote.cartMandateId,
-            paymentRequestId: quote.paymentRequestId,
-            cartSha256: quote.cartSha256,
-            expiresAt: quote.cartMandate.contents.cart_expiry,
-            maxFeeBaseUnits: purchases.agent.policy.maxFeeBaseUnits,
-            grossLimitBaseUnits: validation?.ok === true ? validation.cart.grossLimitBaseUnits : null,
-            payeeAllowlist: purchases.agent.policy.payeeAllowlist,
-            perPaymentCapBaseUnits: purchases.agent.policy.perPaymentCapBaseUnits,
-            dailyCapBaseUnits: purchases.agent.policy.dailyCapBaseUnits,
+            ...quote,
+            maxFeeBaseUnits: limits.maxFeeBaseUnits,
+            payeeAllowlist: limits.payeeAllowlist,
+            perPaymentCapBaseUnits: limits.perPaymentCapBaseUnits,
+            dailyCapBaseUnits: limits.dailyCapBaseUnits,
           },
-    checks: validation?.checks ?? [],
+    checks: record.checks,
+    authorization: record.authorization ?? null,
+    payments: { gateway: kind, provenance: observer.provenance, chainId: network.chainId, token: network.token, tokenDecimals: network.tokenDecimals, coin: network.coin },
     payment: attempt === undefined ? null : attemptView(attempt),
     signatureSubmittedAt: record.signatureSubmittedAt ?? null,
     run:

@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { assertProvenanceAllowed, type CartMandate, type PaymentRail } from "@settleback/adapters";
+import { assertProvenanceAllowed, type CartMandate, type PaymentRail, type Provenance } from "@settleback/adapters";
 import { PAYMENT_ATTEMPT_MACHINE, assertTransition, type PaymentAttemptState } from "@settleback/domain";
 import { immediateTransaction } from "../db/database.ts";
 import { OperationNotFoundError, StoreError } from "../db/errors.ts";
 import { appendEvent } from "../db/events.ts";
-import { getOperation } from "../db/operations.ts";
+import { getOperation, type OperationRecord } from "../db/operations.ts";
 
 /** How long a quoted cart stays payable, as the gateway suggests for one-time orders. */
 export const CART_LIFETIME_MS = 2 * 60 * 60 * 1000;
@@ -45,11 +45,49 @@ export interface Quote {
  * same identifiers; quoting again never creates a second order. Nothing here moves money.
  */
 export async function quoteOperation(db: DatabaseSync, input: QuoteInput): Promise<Quote> {
+  const { attempt, operation } = stageOriginalAttempt(db, { operationId: input.operationId, provenance: input.rail.provenance, deploymentId: input.deploymentId, now: input.now, ...(input.newId === undefined ? {} : { newId: input.newId }) });
+
+  const prepared = await input.rail.prepare({
+    cartMandateId: attempt.cartMandateId,
+    paymentRequestId: attempt.paymentRequestId,
+    payee: operation.seller,
+    chainId: operation.chainId,
+    token: operation.token,
+    coin: input.coin,
+    tokenDecimals: operation.tokenDecimals,
+    priceUsd: operation.priceUsd,
+    label: input.label,
+    // Fixed by the attempt, so every quote for it has the same contents and cart hash.
+    expiresAt: new Date(Date.parse(attempt.createdAt) + CART_LIFETIME_MS).toISOString(),
+  });
+
+  markPrepared(db, attempt.id, prepared, input.now().toISOString());
+
+  return {
+    attemptId: attempt.id,
+    cartMandate: prepared.cartMandate,
+    cartMandateId: attempt.cartMandateId,
+    paymentRequestId: attempt.paymentRequestId,
+    cartSha256: prepared.cartSha256,
+    recovered: prepared.recovered,
+  };
+}
+
+export interface StagedAttempt {
+  operation: OperationRecord;
+  attempt: { id: string; cartMandateId: string; paymentRequestId: string; createdAt: string; state: PaymentAttemptState };
+}
+
+/**
+ * The operation's live original attempt while it can still be quoted, or a new CREATED attempt
+ * with its gateway identifiers, stored before any gateway order exists.
+ */
+export function stageOriginalAttempt(db: DatabaseSync, input: { operationId: string; provenance: Provenance; deploymentId: string; now: () => Date; newId?: () => string }): StagedAttempt {
   const newId = input.newId ?? randomUUID;
-  const { attempt, operation } = immediateTransaction(db, () => {
+  return immediateTransaction(db, () => {
     const operation = getOperation(db, input.operationId);
     if (operation === undefined) throw new OperationNotFoundError(input.operationId);
-    assertProvenanceAllowed(operation.environment, input.rail.provenance);
+    assertProvenanceAllowed(operation.environment, input.provenance);
     const live = db
       .prepare(
         `SELECT id, state, cart_mandate_id, payment_request_id, created_at FROM payment_attempts
@@ -61,12 +99,12 @@ export async function quoteOperation(db: DatabaseSync, input: QuoteInput): Promi
       if (!QUOTABLE.includes(state)) throw new AttemptNotQuotableError(operation.id, state);
       return {
         operation,
-        attempt: { id: String(live.id), cartMandateId: String(live.cart_mandate_id), paymentRequestId: String(live.payment_request_id), createdAt: String(live.created_at) },
+        attempt: { id: String(live.id), cartMandateId: String(live.cart_mandate_id), paymentRequestId: String(live.payment_request_id), createdAt: String(live.created_at), state },
       };
     }
     const id = newId();
     const createdAt = input.now().toISOString();
-    const attempt = { id, cartMandateId: `cart-${id}`, paymentRequestId: `pr-${id}`, createdAt };
+    const attempt = { id, cartMandateId: `cart-${id}`, paymentRequestId: `pr-${id}`, createdAt, state: "CREATED" as const };
     db.prepare(
       `INSERT INTO payment_attempts (id, operation_id, purpose, state, payer, payee, chain_id, token, amount_base_units,
          intent_sha256, deployment_id, cart_mandate_id, payment_request_id, created_at, updated_at)
@@ -98,31 +136,6 @@ export async function quoteOperation(db: DatabaseSync, input: QuoteInput): Promi
     });
     return { operation, attempt };
   });
-
-  const prepared = await input.rail.prepare({
-    cartMandateId: attempt.cartMandateId,
-    paymentRequestId: attempt.paymentRequestId,
-    payee: operation.seller,
-    chainId: operation.chainId,
-    token: operation.token,
-    coin: input.coin,
-    tokenDecimals: operation.tokenDecimals,
-    priceUsd: operation.priceUsd,
-    label: input.label,
-    // Fixed by the attempt, so every quote for it has the same contents and cart hash.
-    expiresAt: new Date(Date.parse(attempt.createdAt) + CART_LIFETIME_MS).toISOString(),
-  });
-
-  markPrepared(db, attempt.id, prepared, input.now().toISOString());
-
-  return {
-    attemptId: attempt.id,
-    cartMandate: prepared.cartMandate,
-    cartMandateId: attempt.cartMandateId,
-    paymentRequestId: attempt.paymentRequestId,
-    cartSha256: prepared.cartSha256,
-    recovered: prepared.recovered,
-  };
 }
 
 /**
@@ -130,20 +143,23 @@ export async function quoteOperation(db: DatabaseSync, input: QuoteInput): Promi
  * repeated or recovered quote of the same attempt must carry the same cart; once the attempt has
  * moved on, nothing changes.
  */
-export function markPrepared(db: DatabaseSync, attemptId: string, prepared: { cartSha256: string; recovered: boolean }, now: string): void {
+export function markPrepared(db: DatabaseSync, attemptId: string, prepared: { cartSha256: string; recovered: boolean; flowId?: string }, now: string): void {
   immediateTransaction(db, () => {
-    const row = db.prepare("SELECT state, revision, cart_sha256 FROM payment_attempts WHERE id = ?").get(attemptId);
+    const row = db.prepare("SELECT state, revision, cart_sha256, flow_id FROM payment_attempts WHERE id = ?").get(attemptId);
     if (row === undefined) throw new Error(`payment attempt ${attemptId} disappeared`);
     const state = String(row.state) as PaymentAttemptState;
     if (row.cart_sha256 !== null && row.cart_sha256 !== prepared.cartSha256) {
       throw new StoreError("CART_MISMATCH", `Payment attempt ${attemptId} was quoted with different cart contents.`);
     }
+    if (prepared.flowId !== undefined && row.flow_id !== null && row.flow_id !== prepared.flowId) {
+      throw new StoreError("CART_MISMATCH", `Payment attempt ${attemptId} is recorded with a different gateway flow.`);
+    }
     if (state !== "CREATED") return;
     assertTransition(PAYMENT_ATTEMPT_MACHINE, "CREATED", "PREPARED", { actor: "server" });
     const revision = Number(row.revision);
     const updated = db
-      .prepare("UPDATE payment_attempts SET state = 'PREPARED', cart_sha256 = ?, revision = ?, updated_at = ? WHERE id = ? AND revision = ?")
-      .run(prepared.cartSha256, revision + 1, now, attemptId, revision);
+      .prepare("UPDATE payment_attempts SET state = 'PREPARED', cart_sha256 = ?, flow_id = coalesce(?, flow_id), revision = ?, updated_at = ? WHERE id = ? AND revision = ?")
+      .run(prepared.cartSha256, prepared.flowId ?? null, revision + 1, now, attemptId, revision);
     if (updated.changes !== 1) throw new Error(`payment attempt ${attemptId} changed while it was being quoted`);
     appendEvent(db, {
       entityType: "payment_attempt",

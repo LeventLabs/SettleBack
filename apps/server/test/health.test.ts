@@ -23,6 +23,7 @@ describe("GET /api/health", () => {
         paymentChainId: 133,
         registryChainId: 177,
         paymentWrites: "disabled",
+        paymentGateway: "none",
         registry: { status: "not configured", integratedRepayment: "unavailable" },
       });
     } finally {

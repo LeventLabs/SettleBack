@@ -7,7 +7,11 @@ import type { ResultLookup } from "../recovery/retrieval.ts";
 import { loadSourceBytes, loadSources } from "@settleback/fixtures";
 import type { Address } from "@settleback/domain";
 import { TERMS, TOKEN, registerFixturePolicies, setupFixtureCase, type FixtureCaseSetup, type FixtureParties } from "./fixture-case.ts";
+import { simulatedPurchasePayments } from "../payments/purchase-payments.ts";
 import { DemoPurchases } from "./purchases.ts";
+
+/** The demo buyer's limits; every quote and authorization is checked against them before anything is signed. */
+export const DEMO_BUYER_LIMITS = { perPaymentCapBaseUnits: "5000000", dailyCapBaseUnits: "20000000", maxFeeBaseUnits: "100000" } as const;
 
 /** The demo's cases: a lost result, a refundable failure, a hidden completion only a cited assessment finds, and its counterfactual. */
 export const DEMO_FIXTURES = ["lost-response", "refundable-failure-per-case", "hidden-completion", "unbacked-completion-claim"] as const;
@@ -48,18 +52,19 @@ export async function startDemoWorld(db: DatabaseSync, options: { parties: Fixtu
   if (source === undefined || policy === undefined) throw new Error("the demo's source document or delivery terms are missing");
   const purchases = new DemoPurchases(db, {
     seller: options.parties.seller.toLowerCase() as Address,
-    agent: {
-      rail: sim.rail,
-      merchant,
-      // The demo buyer's limits; every quote is checked against them before anything is signed.
-      policy: { payeeAllowlist: [options.parties.seller.toLowerCase() as Address], perPaymentCapBaseUnits: "5000000", dailyCapBaseUnits: "20000000", maxFeeBaseUnits: "100000", usdRate: "1" },
-      deploymentId: "local-demo",
-      coin: "USDC",
-      label: "Structured extraction job",
-    },
+    payments: simulatedPurchasePayments(
+      {
+        rail: sim.rail,
+        merchant,
+        policy: { ...DEMO_BUYER_LIMITS, payeeAllowlist: [options.parties.seller.toLowerCase() as Address], usdRate: "1" },
+        deploymentId: "local-demo",
+        coin: "USDC",
+        label: "Structured extraction job",
+      },
+      { chainId: 133, token: TOKEN as Address, tokenDecimals: 6 },
+    ),
     source: { id: source.id, text: loadSourceBytes(source).toString("utf8"), sha256: source.sourceSha256 },
     policy: { id: policy.id, sha256: policy.sha256 },
-    token: TOKEN as Address,
     now: () => new Date(),
   });
 

@@ -19,6 +19,7 @@ const EXPECTED_TABLES = [
   "meta",
   "operations",
   "payment_attempts",
+  "payment_offers",
   "policies",
   "proof_allocations",
   "recovery_actions",

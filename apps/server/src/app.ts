@@ -11,7 +11,7 @@ import type { DemoPurchases } from "./demo/purchases.ts";
 import { handleError } from "./http/errors.ts";
 import { RequestGuard } from "./http/guard.ts";
 import type { AssessmentProvider } from "./recovery/provider.ts";
-import type { RepaymentPayments } from "./recovery/repayment.ts";
+import type { AnyRepaymentPayments } from "./recovery/repayment.ts";
 import type { ResultLookup } from "./recovery/retrieval.ts";
 
 export interface AppDependencies {
@@ -23,7 +23,7 @@ export interface AppDependencies {
   lookup?: ResultLookup | undefined;
   provider?: AssessmentProvider | undefined;
   /** The rail and signer repayments are paid with; used only when payment writes are enabled. */
-  payments?: RepaymentPayments | undefined;
+  payments?: AnyRepaymentPayments | undefined;
   /** Jobs bought through the workspace in the local demo; used only when payment writes are enabled. */
   purchases?: DemoPurchases | undefined;
   clock?: () => Date;
@@ -76,6 +76,8 @@ export function buildApp(config: ServerConfig, dependencies: AppDependencies): F
     paymentChainId: network.paymentChainId,
     registryChainId: network.registryChainId,
     paymentWrites: config.paymentWritesEnabled ? "enabled" : "disabled",
+    // Which gateway pays: the simulator, HSP Agentic Payment, or none connected.
+    paymentGateway: !config.paymentWritesEnabled || dependencies.payments === undefined ? "none" : dependencies.payments.kind === "hsp-agentic" ? "hsp-agentic" : "simulated",
     registry:
       dependencies.registry === undefined
         ? { status: "not configured", integratedRepayment: "unavailable" }

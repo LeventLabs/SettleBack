@@ -14,7 +14,14 @@ import { confirmRepaymentReservation, prepareRecovery } from "../recovery/action
 import { assessCase } from "../recovery/assessment.ts";
 import { readCaseBaseline } from "../recovery/baseline.ts";
 import type { AssessmentProvider } from "../recovery/provider.ts";
-import { liveAttempt, requestRepaymentSignature, submitRepaymentSignature, type RepaymentPayments } from "../recovery/repayment.ts";
+import {
+  liveAttempt,
+  requestHspRepaymentSignature,
+  requestRepaymentSignature,
+  submitHspRepaymentSignature,
+  submitRepaymentSignature,
+  type AnyRepaymentPayments,
+} from "../recovery/repayment.ts";
 import { acknowledgeDelivery, retrieveResult, type ResultLookup } from "../recovery/retrieval.ts";
 import type { RequestGuard } from "./guard.ts";
 import { actionView, assessmentView, attemptView, caseSummaryView, caseView, operationView, type Relation } from "./views.ts";
@@ -32,7 +39,7 @@ export interface CaseRouteDependencies {
   provider: AssessmentProvider | undefined;
   assessmentTimeoutMs: number;
   /** The rail and signer repayments are paid with; absent when payment writes are disabled. */
-  payments: RepaymentPayments | undefined;
+  payments: AnyRepaymentPayments | undefined;
 }
 
 const ID_PARAMS = {
@@ -191,18 +198,34 @@ export function registerCaseRoutes(app: FastifyInstance, deps: CaseRouteDependen
     },
   );
 
-  // The seller's wallet pays the repayment in two steps: this returns the mandate to sign, once the
-  // permit is consumed; a repeated request offers the same mandate or reports the repayment under way.
+  // The seller's wallet pays the repayment in two steps: this returns the typed data to sign (the
+  // simulated gateway's mandate once its permit is consumed, or HSP's checked authorization); a
+  // repeated request offers the same one or reports the repayment under way.
   app.post("/api/cases/:id/recovery/repay", { schema: { params: ID_PARAMS } }, async (request) => {
     const session = guard.session(request, { wallet: true });
     const { id } = request.params as { id: string };
     const { relations } = readTransaction(db, () => scopeCase(db, session, id));
     requireRelation(relations, ["seller"], "Only the operation's seller pays its repayment.");
     const payments = requirePayments(deps.payments);
+    if (payments.kind === "hsp-agentic") {
+      const outcome = await requestHspRepaymentSignature(db, { caseId: id, requestedBy: session.address, registry: deps.registry, payments, now });
+      return {
+        status: outcome.status,
+        ...(outcome.status === "SIGNATURE_REQUIRED" ? { typedData: outcome.typedData, authorization: outcome.authorization, checks: outcome.checks } : {}),
+        action: actionView(outcome.action),
+        payment: outcome.attempt === undefined ? null : attemptView(outcome.attempt),
+      };
+    }
     const outcome = await requestRepaymentSignature(db, { caseId: id, requestedBy: session.address, registry: deps.registry, payments, now });
     return {
       status: outcome.status,
-      ...(outcome.status === "SIGNATURE_REQUIRED" ? { typedData: walletTypedData(outcome.payload), mandate: outcome.payload.mandate } : {}),
+      ...(outcome.status === "SIGNATURE_REQUIRED"
+        ? {
+            typedData: walletTypedData(outcome.payload),
+            mandate: outcome.payload.mandate,
+            authorization: { recipient: outcome.payload.payee, payer: outcome.payload.payer, amountBaseUnits: outcome.payload.amountBaseUnits, quoteExpiresAt: null, preparedBy: "payment-agent" },
+          }
+        : {}),
       action: actionView(outcome.action),
       payment: outcome.attempt === undefined ? null : attemptView(outcome.attempt),
     };
@@ -222,7 +245,11 @@ export function registerCaseRoutes(app: FastifyInstance, deps: CaseRouteDependen
       const { signature } = request.body as { signature: string };
       const { relations } = readTransaction(db, () => scopeCase(db, session, id));
       requireRelation(relations, ["seller"], "Only the operation's seller pays its repayment.");
-      const outcome = await submitRepaymentSignature(db, { caseId: id, requestedBy: session.address, signature, registry: deps.registry, payments: requirePayments(deps.payments), now });
+      const payments = requirePayments(deps.payments);
+      const outcome =
+        payments.kind === "hsp-agentic"
+          ? await submitHspRepaymentSignature(db, { caseId: id, requestedBy: session.address, signature, registry: deps.registry, payments, now })
+          : await submitRepaymentSignature(db, { caseId: id, requestedBy: session.address, signature, registry: deps.registry, payments, now });
       return {
         status: outcome.status,
         ...(outcome.status === "OUTCOME_UNKNOWN" ? { reason: outcome.reason } : {}),
@@ -319,7 +346,7 @@ function requireTerms(terms: ReadonlyMap<string, PolicyTerms>, operation: Operat
   if (!terms.has(operation.policyId)) throw new RecoveryRefusedError("DEPENDENCY_UNAVAILABLE", `No service terms are loaded for policy ${operation.policyId}.`);
 }
 
-function requirePayments(payments: RepaymentPayments | undefined): RepaymentPayments {
+function requirePayments(payments: AnyRepaymentPayments | undefined): AnyRepaymentPayments {
   if (payments === undefined) throw new RecoveryRefusedError("DEPENDENCY_UNAVAILABLE", "Payment writes are disabled or no payment rail is connected; repayments cannot be paid.");
   return payments;
 }

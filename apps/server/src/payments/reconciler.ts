@@ -1,14 +1,14 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { PaymentRail, RegistryGateway } from "@settleback/adapters";
+import type { RegistryGateway } from "@settleback/adapters";
 import { readTransaction } from "../db/database.ts";
 import { completeRepayment } from "../recovery/repayment.ts";
 import { recordRetrievalOutcome, type OutcomeRecording } from "../recovery/retrieval.ts";
-import { RECONCILABLE, reconcileAttempt, type Reconciliation } from "./reconcile.ts";
+import { RECONCILABLE, reconcileAttempt, type PaymentObserver, type Reconciliation } from "./reconcile.ts";
 
 export interface ReconcileRunInput {
   db: DatabaseSync;
   /** Without a rail, payment attempts are left for a run that has one. */
-  rail: PaymentRail | undefined;
+  rail: PaymentObserver | undefined;
   /** Without a registry, pending outcome records are left for a run that has one. */
   registry: RegistryGateway | undefined;
   now: () => Date;

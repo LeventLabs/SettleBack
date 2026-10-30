@@ -18,14 +18,18 @@ import { immediateTransaction, readTransaction } from "../db/database.ts";
 import { getOperation } from "../db/operations.ts";
 import { getPaymentAttempt, moveAttempt, type PaymentAttemptRecord } from "../db/payments.ts";
 import { ExecutionRefusedError } from "./execution.ts";
+import { claimedAuthorization } from "./hsp-authorization.ts";
 
 /** States after the permit was consumed and before a final answer: the ones observation may move. */
 export const RECONCILABLE: readonly PaymentAttemptState[] = ["SIGNING_REQUESTED", "SUBMITTED", "OBSERVED", "UNKNOWN"];
 const PROGRESSION: readonly PaymentAttemptState[] = ["SIGNING_REQUESTED", "SUBMITTED", "OBSERVED", "VERIFIED"];
 
+/** What reconciliation needs from a payment rail: reading a payment, never making one. */
+export type PaymentObserver = Pick<PaymentRail, "provenance" | "observe">;
+
 export interface ReconcileAttemptInput {
   attemptId: string;
-  rail: PaymentRail;
+  rail: PaymentObserver;
   now: () => Date;
   /** The gateway level at which a matching on-chain transfer counts as verified. */
   requiredLevel: "SAFE" | "FINAL";
@@ -80,6 +84,8 @@ export async function reconcileAttempt(db: DatabaseSync, input: ReconcileAttempt
   if (record.payment_request_id !== attempt.paymentRequestId || record.cart_mandate_id !== attempt.cartMandateId) {
     return unchanged(attempt, "the gateway answered with a record for a different order", observation.kind);
   }
+  // An authorization a gateway prepared names the exact amount and nonce the transfer must carry.
+  const authorized = readTransaction(db, () => claimedAuthorization(db, attempt.id));
   const verdict = verifySettlement({
     expected: { payer: attempt.payer, payee: attempt.payee, chainId: attempt.chainId, token: attempt.token, amountBaseUnits: attempt.amountBaseUnits },
     tokenDecimals,
@@ -87,6 +93,7 @@ export async function reconcileAttempt(db: DatabaseSync, input: ReconcileAttempt
     transfer: observation.transfer,
     requiredLevel: input.requiredLevel,
     ...(input.pinnedUsdRate === undefined ? {} : { pinnedUsdRate: input.pinnedUsdRate }),
+    ...(authorized === undefined ? {} : authorized),
   });
 
   return immediateTransaction(db, () => {

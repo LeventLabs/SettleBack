@@ -8,6 +8,7 @@ import { readCaseEvidence } from "../../src/db/cases.ts";
 import { DemoPurchases, RESPONSE_DEADLINE_MS, type PurchaseScenario } from "../../src/demo/purchases.ts";
 import { executePayment } from "../../src/payments/execution.ts";
 import { quoteForBuyer, requestPaymentSignature, submitPaymentSignature, type BuyerPaymentAgent } from "../../src/payments/purchase.ts";
+import { simulatedPurchasePayments } from "../../src/payments/purchase-payments.ts";
 import { reconcilePending } from "../../src/payments/reconciler.ts";
 import { TOKEN, memoryDatabase } from "../db/helpers.ts";
 import { TERMS, registerFixturePolicies } from "../recovery/helpers.ts";
@@ -22,6 +23,7 @@ if (source === undefined || policy === undefined) throw new Error("fixtures miss
 let db: DatabaseSync;
 let sim: SimulatedAdapters;
 let purchases: DemoPurchases;
+let buyerAgent: BuyerPaymentAgent;
 let keys = 0;
 
 function agent(overrides: Partial<BuyerPaymentAgent["policy"]> = {}): BuyerPaymentAgent {
@@ -36,12 +38,12 @@ function agent(overrides: Partial<BuyerPaymentAgent["policy"]> = {}): BuyerPayme
 }
 
 function demoPurchases(using: BuyerPaymentAgent = agent()): DemoPurchases {
+  buyerAgent = using;
   return new DemoPurchases(db, {
     seller,
-    agent: using,
+    payments: simulatedPurchasePayments(using, { chainId: 133, token: TOKEN as Address, tokenDecimals: 6 }),
     source: { id: source!.id, text: loadSourceBytes(source!).toString("utf8"), sha256: source!.sourceSha256 },
     policy: { id: policy!.id, sha256: policy!.sha256 },
-    token: TOKEN as Address,
     now: () => sim.clock.now(),
   });
 }
@@ -63,10 +65,10 @@ function key(): string {
 /** Buys a job and pays it from the buyer's wallet, through the gateway simulator, to a verified payment. */
 async function paid(scenario: PurchaseScenario): Promise<string> {
   const record = await purchases.create({ buyer: buyer.address, scenario, idempotencyKey: key() });
-  const requested = await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: purchases.agent, now: () => sim.clock.now() });
+  const requested = await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: buyerAgent, now: () => sim.clock.now() });
   if (requested.status !== "SIGNATURE_REQUIRED") throw new Error("expected a mandate");
   const signature = await buyer.signTypedData(eip3009TypedData(requested.payload));
-  expect((await submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature, agent: purchases.agent })).status).toBe("SUBMITTED");
+  expect((await submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature, agent: buyerAgent })).status).toBe("SUBMITTED");
   for (let tick = 0; tick < 6; tick += 1) sim.gateway.tick();
   await reconcile();
   expect(purchases.attempt(record.operationId)?.state).toBe("VERIFIED");
@@ -96,9 +98,9 @@ describe("buying a job from the workspace", () => {
   it("quotes with every Payment Agent check reported, and the same key returns the same purchase", async () => {
     const purchaseKey = key();
     const first = await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: purchaseKey });
-    expect(first.validation?.ok).toBe(true);
-    expect(first.validation?.checks).toHaveLength(12);
-    expect(new Set(first.validation?.checks.map((check) => check.status))).toEqual(new Set(["passed"]));
+    expect(first.quote?.grossLimitBaseUnits).toBe("1100000");
+    expect(first.checks).toHaveLength(12);
+    expect(new Set(first.checks.map((check) => check.status))).toEqual(new Set(["passed"]));
     const again = await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: purchaseKey });
     expect(again.operationId).toBe(first.operationId);
     expect(Number(db.prepare("SELECT count(*) AS n FROM payment_attempts").get()?.n)).toBe(1);
@@ -110,8 +112,8 @@ describe("buying a job from the workspace", () => {
   it("blocks signing when a check fails, and says which one and why", async () => {
     purchases = demoPurchases(agent({ perPaymentCapBaseUnits: "500000" }));
     const record = await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: key() });
-    expect(record.validation?.checks.find((check) => check.id === "per-payment-cap")).toMatchObject({ status: "blocked", reason: "the gross amount exceeds the per-payment cap" });
-    await expect(requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: purchases.agent, now: () => sim.clock.now() })).rejects.toMatchObject({ code: "CART_REJECTED" });
+    expect(record.checks.find((check) => check.id === "per-payment-cap")).toMatchObject({ status: "blocked", reason: "the gross amount exceeds the per-payment cap" });
+    await expect(requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: buyerAgent, now: () => sim.clock.now() })).rejects.toMatchObject({ code: "CART_REJECTED" });
     expect(purchases.attempt(record.operationId)?.state).toBe("PREPARED");
   });
 
@@ -120,16 +122,16 @@ describe("buying a job from the workspace", () => {
     purchases = demoPurchases(agent({ dailyCapBaseUnits: "2150000" }));
     await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: key() });
     const quotedOnly = await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: key() });
-    expect(quotedOnly.validation?.checks.find((check) => check.id === "daily-cap")?.status).toBe("passed");
+    expect(quotedOnly.checks.find((check) => check.id === "daily-cap")?.status).toBe("passed");
     await paid("response-lost");
     const over = await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: key() });
-    expect(over.validation?.checks.find((check) => check.id === "daily-cap")).toMatchObject({ status: "blocked", reason: "the gross amount would exceed today's cap" });
+    expect(over.checks.find((check) => check.id === "daily-cap")).toMatchObject({ status: "blocked", reason: "the gross amount would exceed today's cap" });
   });
 
   it("answers concurrent authorization requests with the one mandate, and refuses a signature before one was requested", async () => {
     const record = await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: key() });
-    await expect(submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature: `0x${"11".repeat(65)}`, agent: purchases.agent })).rejects.toMatchObject({ code: "ATTEMPT_NOT_EXECUTABLE" });
-    const results = await Promise.all(Array.from({ length: 5 }, () => requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: purchases.agent, now: () => sim.clock.now() })));
+    await expect(submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature: `0x${"11".repeat(65)}`, agent: buyerAgent })).rejects.toMatchObject({ code: "ATTEMPT_NOT_EXECUTABLE" });
+    const results = await Promise.all(Array.from({ length: 5 }, () => requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: buyerAgent, now: () => sim.clock.now() })));
     const payloads = results.map((result) => (result.status === "SIGNATURE_REQUIRED" ? JSON.stringify(result.payload) : result.status));
     expect(new Set(payloads).size).toBe(1);
     expect(payloads[0]).not.toBe("ALREADY_REQUESTED");
@@ -138,9 +140,9 @@ describe("buying a job from the workspace", () => {
 
   it("lets only the buyer authorize, offers one mandate, and submits one payment however often it is sent", async () => {
     const record = await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: key() });
-    const ask = (who: string) => requestPaymentSignature(db, { operationId: record.operationId, buyer: who, agent: purchases.agent, now: () => sim.clock.now() });
+    const ask = (who: string) => requestPaymentSignature(db, { operationId: record.operationId, buyer: who, agent: buyerAgent, now: () => sim.clock.now() });
     await expect(ask(stranger)).rejects.toMatchObject({ code: "ROLE_FORBIDDEN" });
-    await expect(quoteForBuyer(db, { operationId: record.operationId, buyer: stranger, agent: purchases.agent, now: () => sim.clock.now() })).rejects.toMatchObject({ code: "ROLE_FORBIDDEN" });
+    await expect(quoteForBuyer(db, { operationId: record.operationId, buyer: stranger, agent: buyerAgent, now: () => sim.clock.now() })).rejects.toMatchObject({ code: "ROLE_FORBIDDEN" });
     const first = await ask(buyer.address);
     const second = await ask(buyer.address);
     if (first.status !== "SIGNATURE_REQUIRED" || second.status !== "SIGNATURE_REQUIRED") throw new Error("expected a mandate");
@@ -148,26 +150,26 @@ describe("buying a job from the workspace", () => {
     expect(first.payload.authorization).toMatchObject({ from: buyer.address.toLowerCase(), to: seller, value: "1000000" });
     const signature = await buyer.signTypedData(eip3009TypedData(first.payload));
     const forged = await privateKeyToAccount(`0x${"c3".repeat(32)}`).signTypedData(eip3009TypedData(first.payload));
-    await expect(submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature: forged, agent: purchases.agent })).rejects.toMatchObject({ code: "MANDATE_SIGNATURE_INVALID" });
-    const results = await Promise.all(Array.from({ length: 10 }, () => submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature, agent: purchases.agent })));
+    await expect(submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature: forged, agent: buyerAgent })).rejects.toMatchObject({ code: "MANDATE_SIGNATURE_INVALID" });
+    const results = await Promise.all(Array.from({ length: 10 }, () => submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature, agent: buyerAgent })));
     expect(results.filter((result) => result.status === "SUBMITTED")).toHaveLength(1);
     expect(results.filter((result) => result.status === "ALREADY_REQUESTED")).toHaveLength(9);
   });
 
   it("does not offer a wallet a mandate that was claimed for a server-side signer", async () => {
     const record = await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: key() });
-    const { attempt, validation } = await quoteForBuyer(db, { operationId: record.operationId, buyer: buyer.address, agent: purchases.agent, now: () => sim.clock.now() });
+    const { attempt, validation } = await quoteForBuyer(db, { operationId: record.operationId, buyer: buyer.address, agent: buyerAgent, now: () => sim.clock.now() });
     if (!validation.ok) throw new Error("expected a valid quote");
     const signer = { provenance: "SIMULATED" as const, sign: async (payload: Parameters<typeof signSimulatedPayload>[0]) => signSimulatedPayload(payload) };
     expect((await executePayment(db, { attemptId: attempt.id, requestedBy: buyer.address, cart: validation.cart, signer, rail: sim.rail, now: () => sim.clock.now() })).status).toBe("SUBMITTED");
-    expect((await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: purchases.agent, now: () => sim.clock.now() })).status).toBe("ALREADY_REQUESTED");
+    expect((await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: buyerAgent, now: () => sim.clock.now() })).status).toBe("ALREADY_REQUESTED");
   });
 
   it("starts the job only once the payment is verified", async () => {
     const record = await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: key() });
-    const requested = await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: purchases.agent, now: () => sim.clock.now() });
+    const requested = await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: buyerAgent, now: () => sim.clock.now() });
     if (requested.status !== "SIGNATURE_REQUIRED") throw new Error("expected a mandate");
-    await submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature: await buyer.signTypedData(eip3009TypedData(requested.payload)), agent: purchases.agent });
+    await submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature: await buyer.signTypedData(eip3009TypedData(requested.payload)), agent: buyerAgent });
     await after(1_000);
     expect(purchases.get(record.operationId)?.run).toBeUndefined();
     for (let tick = 0; tick < 6; tick += 1) sim.gateway.tick();
@@ -175,24 +177,24 @@ describe("buying a job from the workspace", () => {
     await after(1_000);
     expect(kinds(record.operationId)).toEqual(["payment-verified", "job-started"]);
     // Once paid, asking again authorizes nothing new, and the same purchase key returns the same purchase.
-    expect((await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: purchases.agent, now: () => sim.clock.now() })).status).toBe("ALREADY_REQUESTED");
+    expect((await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: buyerAgent, now: () => sim.clock.now() })).status).toBe("ALREADY_REQUESTED");
   });
 
   it("returns the same purchase for its key after the payment, without quoting again", async () => {
     const purchaseKey = key();
     const record = await purchases.create({ buyer: buyer.address, scenario: "succeeds", idempotencyKey: purchaseKey });
-    const requested = await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: purchases.agent, now: () => sim.clock.now() });
+    const requested = await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: buyerAgent, now: () => sim.clock.now() });
     if (requested.status !== "SIGNATURE_REQUIRED") throw new Error("expected a mandate");
-    await submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature: await buyer.signTypedData(eip3009TypedData(requested.payload)), agent: purchases.agent });
+    await submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature: await buyer.signTypedData(eip3009TypedData(requested.payload)), agent: buyerAgent });
     expect((await purchases.create({ buyer: buyer.address, scenario: "succeeds", idempotencyKey: purchaseKey })).operationId).toBe(record.operationId);
   });
 
   it("never starts the job when the payment's outcome is unknown", async () => {
     const record = await purchases.create({ buyer: buyer.address, scenario: "response-lost", idempotencyKey: key() });
-    const requested = await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: purchases.agent, now: () => sim.clock.now() });
+    const requested = await requestPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, agent: buyerAgent, now: () => sim.clock.now() });
     if (requested.status !== "SIGNATURE_REQUIRED") throw new Error("expected a mandate");
     sim.gateway.injectFault(requested.payload.paymentRequestId, { kind: "wrong-receipt", field: "amount" } satisfies GatewayFault);
-    await submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature: await buyer.signTypedData(eip3009TypedData(requested.payload)), agent: purchases.agent });
+    await submitPaymentSignature(db, { operationId: record.operationId, buyer: buyer.address, signature: await buyer.signTypedData(eip3009TypedData(requested.payload)), agent: buyerAgent });
     for (let tick = 0; tick < 6; tick += 1) sim.gateway.tick();
     await reconcile();
     expect(purchases.attempt(record.operationId)?.state).toBe("UNKNOWN");

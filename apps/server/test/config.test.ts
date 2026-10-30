@@ -117,13 +117,13 @@ describe("loadConfig", () => {
   it("runs the fixture demo only locally, in memory, for two distinct accounts", () => {
     const parties = { SETTLEBACK_DEMO_BUYER: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC", SETTLEBACK_DEMO_SELLER: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" };
     const demo = loadConfig({ SETTLEBACK_DEMO: "fixtures", ...parties });
-    expect(demo.demo).toEqual({ buyer: parties.SETTLEBACK_DEMO_BUYER.toLowerCase(), seller: parties.SETTLEBACK_DEMO_SELLER.toLowerCase(), registry: "local" });
+    expect(demo.demo).toEqual({ kind: "fixtures", buyer: parties.SETTLEBACK_DEMO_BUYER.toLowerCase(), seller: parties.SETTLEBACK_DEMO_SELLER.toLowerCase(), registry: "local" });
     expect(demo.databasePath).toBe(":memory:");
     expect(() => loadConfig({ SETTLEBACK_DEMO: "fixtures" })).toThrow(/SETTLEBACK_DEMO_BUYER/);
     expect(() => loadConfig({ SETTLEBACK_DEMO: "fixtures", ...parties, SETTLEBACK_DEMO_SELLER: parties.SETTLEBACK_DEMO_BUYER.toLowerCase() })).toThrow(/different accounts/);
     expect(() => loadConfig({ SETTLEBACK_DEMO: "fixtures", ...parties, SETTLEBACK_DB_PATH: "/tmp/demo.db" })).toThrow(/in memory/);
     expect(() => loadConfig({ SETTLEBACK_DEMO: "everything", ...parties })).toThrow(/SETTLEBACK_DEMO must be/);
-    expect(() => loadConfig({ SETTLEBACK_ENV: "testnet", SETTLEBACK_WEB_ORIGIN: "https://settleback.xyz", SETTLEBACK_DEMO: "fixtures", ...parties })).toThrow(/only to the local environment/);
+    expect(() => loadConfig({ SETTLEBACK_ENV: "testnet", SETTLEBACK_WEB_ORIGIN: "https://settleback.xyz", SETTLEBACK_DEMO: "fixtures", ...parties })).toThrow(/fixtures applies only to the local environment/);
     expect(() => loadConfig(parties)).toThrow(/apply only with SETTLEBACK_DEMO/);
   });
 
@@ -162,5 +162,39 @@ describe("loadConfig", () => {
       expect(String(error)).toMatch(/SETTLEBACK_VERIFIER_PRIVATE_KEY/);
       expect(String(error)).not.toContain(key.slice(2));
     }
+  });
+  it("configures the HSP testnet demo only in the testnet environment, with its registry, team name, and payment chain", () => {
+    const hsp = {
+      SETTLEBACK_ENV: "testnet",
+      SETTLEBACK_DEMO: "hsp-testnet",
+      SETTLEBACK_DEMO_BUYER: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+      SETTLEBACK_DEMO_SELLER: "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+      SETTLEBACK_PAYMENT_WRITES: "enabled",
+      SETTLEBACK_REGISTRY_RPC_URL: "https://testnet.hsk.xyz",
+      SETTLEBACK_REGISTRY_CHAIN_ID: "133",
+      SETTLEBACK_REGISTRY_ADDRESS: "0xf1F8FD66A678693C1Ff02611c285ba105562de34",
+      SETTLEBACK_HSP_MERCHANT_NAME: "SettleBack",
+      SETTLEBACK_PAYMENT_RPC_URL: "https://testnet.hsk.xyz",
+    };
+    const config = loadConfig(hsp);
+    expect(config.demo).toMatchObject({ kind: "hsp-testnet", registry: "hsk-testnet" });
+    expect(config.paymentWritesEnabled).toBe(true);
+    expect(config.databasePath).toMatch(/settleback-testnet\.db$/);
+    // The demo runs on this machine, so the loopback web origin is accepted.
+    expect(config.auth.webOrigin).toBe("http://localhost:5173");
+    expect(config.hsp).toMatchObject({ mcpUrl: "https://mcp-qa.hashkeymerchant.com/", merchantName: "SettleBack", relayToken: undefined });
+    const relayed = loadConfig({ ...hsp, SETTLEBACK_HSP_MCP_URL: "https://relay.example/", SETTLEBACK_HSP_RELAY_TOKEN: "ab".repeat(32) });
+    expect(JSON.stringify(relayed.hsp)).not.toContain("abab");
+    expect(() => loadConfig({ ...hsp, SETTLEBACK_HSP_RELAY_TOKEN: "not-hex" })).toThrow(/RELAY_TOKEN must be/);
+    expect(() => loadConfig({ ...hsp, SETTLEBACK_HSP_MERCHANT_NAME: "" })).toThrow(/MERCHANT_NAME/);
+    expect(() => loadConfig({ ...hsp, SETTLEBACK_HSP_MERCHANT_NAME: " SettleBack" })).toThrow(/MERCHANT_NAME/);
+    expect(() => loadConfig({ ...hsp, SETTLEBACK_PAYMENT_RPC_URL: "http://testnet.hsk.xyz" })).toThrow(/PAYMENT_RPC_URL must use HTTPS/);
+    expect(() => loadConfig({ ...hsp, SETTLEBACK_HSP_MCP_URL: "http://mcp-qa.hashkeymerchant.com/" })).toThrow(/MCP_URL must use HTTPS/);
+    expect(() => loadConfig({ ...hsp, SETTLEBACK_ENV: "local" })).toThrow(/runs in the testnet environment/);
+    expect(() => loadConfig({ ...hsp, SETTLEBACK_REGISTRY_RPC_URL: "", SETTLEBACK_REGISTRY_CHAIN_ID: "", SETTLEBACK_REGISTRY_ADDRESS: "" })).toThrow(/needs its registry/);
+    expect(() => loadConfig({ ...hsp, SETTLEBACK_DEMO_REGISTRY: "hsk-testnet" })).toThrow(/applies only with SETTLEBACK_DEMO=fixtures/);
+    expect(() => loadConfig({ SETTLEBACK_HSP_MERCHANT_NAME: "SettleBack" })).toThrow(/apply only with SETTLEBACK_DEMO=hsp-testnet/);
+    // Outside the HSP demo, a live environment still refuses payment writes.
+    expect(() => loadConfig({ SETTLEBACK_ENV: "testnet", SETTLEBACK_WEB_ORIGIN: "https://settleback.xyz", SETTLEBACK_PAYMENT_WRITES: "enabled" })).toThrow(/not supported/);
   });
 });

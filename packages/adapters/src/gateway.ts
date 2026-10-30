@@ -9,6 +9,8 @@ export const GATEWAY_STATUSES = [
   "payment-verified",
   "payment-processing",
   "payment-included",
+  // HSP Agentic Payment: the payment is still recoverable and is queried again, never replaced.
+  "payment-timeout",
   "payment-safe",
   "payment-finalized",
   "payment-failed",
@@ -59,6 +61,7 @@ export function classifyGatewayRecord(record: GatewayPaymentRecord): Observation
     case "payment-submitted":
     case "payment-verified":
     case "payment-processing":
+    case "payment-timeout":
       return "SUBMITTED";
     case "payment-included":
       return "INCLUDED";

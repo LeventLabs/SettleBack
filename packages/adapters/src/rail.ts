@@ -127,8 +127,22 @@ export interface Ap2MandatePayload extends PayloadTerms {
   mandate: Ap2PaymentMandate;
 }
 
-/** What the payer signs, built from a validated Cart Mandate and never from gateway responses. */
-export type ExecutionPayload = SimulatedMandatePayload | Ap2MandatePayload;
+/**
+ * An authorization HSP Agentic Payment prepared and the Payment Agent checked, bound by the digest
+ * of the stored offer. `amountBaseUnits` is the principal; `authorizedBaseUnits` adds the network
+ * fee when the payer carries it inside the transfer.
+ */
+export interface HspOfferPayload extends PayloadTerms {
+  kind: "hsp-agentic-eip3009";
+  offerSha256: string;
+  authorizedBaseUnits: string;
+}
+
+/**
+ * What the payer signs: built from a validated Cart Mandate, or, for HSP Agentic Payment, prepared
+ * by the gateway and accepted only after every field was checked against the attempt.
+ */
+export type ExecutionPayload = SimulatedMandatePayload | Ap2MandatePayload | HspOfferPayload;
 
 export interface SignedPayload {
   payload: ExecutionPayload;

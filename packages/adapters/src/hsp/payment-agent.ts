@@ -87,13 +87,15 @@ export const CART_CHECKS = [
 export type CartCheckId = (typeof CART_CHECKS)[number]["id"];
 
 /** One check's result. A check skipped because an earlier failure made it meaningless is "not-checked", never "passed". */
-export interface CartCheck {
-  id: CartCheckId;
+export interface PaymentCheck<Id extends string = string> {
+  id: Id;
   label: string;
   status: "passed" | "blocked" | "not-checked";
-  /** Why it was blocked, or null. */
+  /** Why it was blocked or not checked, or null. */
   reason: string | null;
 }
+
+export type CartCheck = PaymentCheck<CartCheckId>;
 
 export type CartValidation = { ok: true; cart: ValidatedCart; checks: CartCheck[] } | { ok: false; rejections: CartRejection[]; checks: CartCheck[] };
 

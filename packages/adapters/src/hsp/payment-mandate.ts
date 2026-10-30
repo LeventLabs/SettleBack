@@ -105,18 +105,17 @@ export function buildEip3009PaymentMandate(terms: MandateTerms): Ap2MandatePaylo
   };
 }
 
+export const EIP712_DOMAIN_TYPE = [
+  { name: "name", type: "string" },
+  { name: "version", type: "string" },
+  { name: "chainId", type: "uint256" },
+  { name: "verifyingContract", type: "address" },
+] as const;
+
 /** The typed data a wallet signs (eth_signTypedData_v4): the authorization under the token's domain, integers as decimal strings. */
-export function walletTypedData(payload: Ap2MandatePayload) {
+export function walletTypedData(payload: Pick<Ap2MandatePayload, "authorization" | "domain">) {
   return {
-    types: {
-      EIP712Domain: [
-        { name: "name", type: "string" },
-        { name: "version", type: "string" },
-        { name: "chainId", type: "uint256" },
-        { name: "verifyingContract", type: "address" },
-      ],
-      ...EIP3009_TYPES,
-    },
+    types: { EIP712Domain: EIP712_DOMAIN_TYPE, ...EIP3009_TYPES },
     primaryType: "TransferWithAuthorization" as const,
     domain: payload.domain,
     message: payload.authorization,
@@ -124,7 +123,7 @@ export function walletTypedData(payload: Ap2MandatePayload) {
 }
 
 /** The same typed data in the form viem signs and verifies. */
-export function eip3009TypedData(payload: Ap2MandatePayload) {
+export function eip3009TypedData(payload: Pick<Ap2MandatePayload, "authorization" | "domain">) {
   const { authorization: auth, domain } = payload;
   return {
     domain: { name: domain.name, version: domain.version, chainId: domain.chainId, verifyingContract: domain.verifyingContract as Hex },
@@ -142,7 +141,7 @@ export function eip3009TypedData(payload: Ap2MandatePayload) {
 }
 
 /** Whether the signature is the payer's EIP-712 signature of exactly this authorization. EOA signatures only. */
-export async function verifyEip3009Signature(payload: Ap2MandatePayload, signature: string): Promise<boolean> {
+export async function verifyEip3009Signature(payload: Pick<Ap2MandatePayload, "authorization" | "domain">, signature: string): Promise<boolean> {
   if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) return false;
   try {
     return await verifyTypedData({ ...eip3009TypedData(payload), address: payload.authorization.from as Hex, signature: signature as Hex });

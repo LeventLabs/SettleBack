@@ -13,6 +13,8 @@ export interface ChainTransfer {
   blockNumber: number;
   confirmations: number;
   status: "success" | "reverted";
+  /** The EIP-3009 nonce this transaction executed for the payer, when the token emitted AuthorizationUsed; absent when not read. */
+  authorizationNonce?: string | null;
 }
 
 /**
@@ -40,6 +42,13 @@ export interface SettlementCheckInput {
   requiredLevel: "SAFE" | "FINAL";
   /** The pinned USD-per-token rate for the stablecoin. Default "1". */
   pinnedUsdRate?: string;
+  /**
+   * The exact amount the payer authorized, when the payer agreed to carry the network fee inside
+   * the transfer; it lies between the principal and the principal plus the maximum fee. Default: the principal.
+   */
+  authorizedBaseUnits?: string;
+  /** The nonce of the authorization the payer signed; the transaction must have executed exactly it. */
+  authorizationNonce?: string;
 }
 
 /**
@@ -90,7 +99,14 @@ export function verifySettlement(input: SettlementCheckInput): SettlementVerdict
   if (!sameAddress(transfer.token, expected.token)) reasons.push("transfer moved a different token");
   if (!sameAddress(transfer.from, expected.payer)) reasons.push("transfer came from a different payer");
   if (!sameAddress(transfer.to, expected.payee)) reasons.push("transfer went to a different payee");
-  if (transfer.amountBaseUnits !== expected.amountBaseUnits) reasons.push("transfer amount differs from the expected principal");
+  const authorized = input.authorizedBaseUnits ?? expected.amountBaseUnits;
+  if (!/^[0-9]+$/.test(authorized) || BigInt(authorized) < BigInt(expected.amountBaseUnits)) reasons.push("the authorized amount is below the principal");
+  else if (transfer.amountBaseUnits !== authorized) {
+    reasons.push(input.authorizedBaseUnits === undefined ? "transfer amount differs from the expected principal" : "transfer amount differs from the authorized amount");
+  }
+  if (input.authorizationNonce !== undefined && transfer.authorizationNonce?.toLowerCase() !== input.authorizationNonce.toLowerCase()) {
+    reasons.push("the transaction did not execute the payer's signed authorization");
+  }
   if (reasons.length > 0) return { status: "MISMATCH", reasons, txHash };
 
   return { status: "VERIFIED", reasons: [], txHash };
